@@ -1850,9 +1850,8 @@ async def exit_admin(message: Message):
 # ==================== ЗАПУСК ====================
 async def set_commands():
     await bot.set_my_commands([
-        BotCommand(command="start", description="Запустить бота"),
-        BotCommand(command="номер", description="Запросить номер из очереди (в группе)"),
-        BotCommand(command="admin", description="Админ-панель"),
+        BotCommand(command="start", description="Start bot"),
+        BotCommand(command="admin", description="Admin panel"),
     ])
 
 async def main():
