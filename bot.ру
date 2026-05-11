@@ -24,9 +24,9 @@ ADMIN_IDS = [8632861931]
 GROUP_ID = -1003944857064
 CHANNEL_ID = "-1003927281437"
 CHANNEL_URL = "https://t.me/+vJ--BMRgVTNiNTg6"
-USD_RATE = 90
-MIN_WITHDRAW_USD = 5
-SPAM_LIMIT_SECONDS = 30
+USD_RATE = 80
+MIN_WITHDRAW_USD = 4
+SPAM_LIMIT_SECONDS = 5
 
 number_queue = deque()
 qr_queue = deque()
@@ -66,11 +66,17 @@ async def init_db():
                 type TEXT DEFAULT 'sms',
                 status TEXT DEFAULT 'pending',
                 message_id INTEGER,
+                thread_id INTEGER,
                 photo_id TEXT,
                 submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 completed_at TIMESTAMP
             )
         """)
+        # Добавляем колонку thread_id если её нет
+        try:
+            await db.execute("ALTER TABLE numbers ADD COLUMN thread_id INTEGER")
+        except:
+            pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS daily_stats (
                 user_id INTEGER,
@@ -162,24 +168,12 @@ async def add_history(user_id: int, type_: str, number: str, amount: float, stat
             await asyncio.sleep(0.5)
     return False
 
-async def get_thread_id(message_id: int):
-    if not message_id:
-        return None
-    try:
-        msg = await bot.forward_message(GROUP_ID, GROUP_ID, message_id)
-        thread_id = msg.message_thread_id
-        await msg.delete()
-        return thread_id
-    except:
-        return None
-
-# ==================== КНОПКА ОТМЕНЫ ====================
+# ==================== КЛАВИАТУРЫ ====================
 def cancel_keyboard():
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_action"))
     return builder.as_markup()
 
-# ==================== КЛАВИАТУРЫ ====================
 def main_menu():
     builder = ReplyKeyboardBuilder()
     builder.add(KeyboardButton(text="📤 Сдать номер"))
@@ -221,7 +215,7 @@ def check_sub_keyboard():
 def number_action_keyboard(number_id: int):
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="📨 Отправил код", callback_data=f"code_sent_{number_id}"))
-    builder.add(InlineKeyboardButton(text="🔄 Запросить повтор", callback_data=f"resend_{number_id}"))
+    builder.add(InlineKeyboardButton(text="⏭ Пропустить номер", callback_data=f"skip_{number_id}"))
     builder.row(InlineKeyboardButton(text="✅ Номер встал", callback_data=f"success_{number_id}"))
     builder.add(InlineKeyboardButton(text="❌ Номер слетел", callback_data=f"failed_{number_id}"))
     builder.row(InlineKeyboardButton(text="🔒 Установлен пароль", callback_data=f"password_{number_id}"))
@@ -261,7 +255,6 @@ def referral_keyboard(code: str):
         builder = InlineKeyboardBuilder()
         builder.add(InlineKeyboardButton(text="📋 Твой код: " + code, callback_data="none"))
         return builder.as_markup()
-    
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(
         text="🔗 Поделиться ссылкой",
@@ -358,20 +351,11 @@ async def check_spam(user_id: int) -> bool:
 async def add_to_queue(user_id: int, username: str, queue_type: str, number: str = None):
     queue = number_queue if queue_type == "number" else qr_queue
     is_user_vip = await is_vip(user_id)
-    
-    entry = {
-        "user_id": user_id,
-        "username": username,
-        "vip": is_user_vip,
-        "number": number,
-        "timestamp": datetime.now()
-    }
-    
+    entry = {"user_id": user_id, "username": username, "vip": is_user_vip, "number": number, "timestamp": datetime.now()}
     queue.append(entry)
     sorted_list = sorted(queue, key=lambda x: (not x["vip"], x["timestamp"]))
     queue.clear()
     queue.extend(sorted_list)
-    
     for i, item in enumerate(queue):
         if item["user_id"] == user_id:
             return i + 1
@@ -385,83 +369,84 @@ async def process_next_in_queue(queue_type: str):
 
 async def process_reward_after_hold(number_id: int, user_id: int, number: str, reward: float):
     hold_minutes = int(await get_setting('hold_minutes'))
-    logging.info(f"Запущен холд для {number_id} на {hold_minutes} минут")
     await asyncio.sleep(hold_minutes * 60)
-    
     if number_id not in pending_rewards:
         return
-    
     ref_bonus = float(await get_setting('referral_bonus'))
-    
     for attempt in range(10):
         try:
             async with aiosqlite.connect(DB_NAME, timeout=30) as db:
                 await db.execute("PRAGMA busy_timeout=5000")
-                
                 cur = await db.execute("SELECT status FROM numbers WHERE id = ?", (number_id,))
                 row = await cur.fetchone()
-                
                 if not row:
-                    if number_id in pending_rewards:
-                        del pending_rewards[number_id]
+                    if number_id in pending_rewards: del pending_rewards[number_id]
                     return
-                    
                 status = row[0]
-                
                 if status == 'failed':
-                    if number_id in pending_rewards:
-                        del pending_rewards[number_id]
+                    if number_id in pending_rewards: del pending_rewards[number_id]
                     return
-                
                 if status == 'success_hold':
-                    await db.execute(
-                        "UPDATE users SET balance_rub = balance_rub + ?, total_earned = total_earned + ?, numbers_success = numbers_success + 1 WHERE user_id = ?",
-                        (reward * USD_RATE, reward * USD_RATE, user_id))
-                    
+                    await db.execute("UPDATE users SET balance_rub = balance_rub + ?, total_earned = total_earned + ?, numbers_success = numbers_success + 1 WHERE user_id = ?",
+                                    (reward * USD_RATE, reward * USD_RATE, user_id))
                     cur_ref = await db.execute("SELECT referred_by FROM users WHERE user_id = ?", (user_id,))
                     ref_row = await cur_ref.fetchone()
                     if ref_row and ref_row[0]:
-                        await db.execute("UPDATE users SET balance_rub = balance_rub + ? WHERE user_id = ?", 
-                                       (ref_bonus * USD_RATE, ref_row[0]))
-                        try:
-                            await bot.send_message(ref_row[0], f"🎁 Реферальный бонус: +{ref_bonus}$!")
-                        except:
-                            pass
-                    
+                        await db.execute("UPDATE users SET balance_rub = balance_rub + ? WHERE user_id = ?", (ref_bonus * USD_RATE, ref_row[0]))
+                        try: await bot.send_message(ref_row[0], f"🎁 Реферальный бонус: +{ref_bonus}$!")
+                        except: pass
                     await db.execute("UPDATE numbers SET status = 'success', completed_at = CURRENT_TIMESTAMP WHERE id = ?", (number_id,))
-                    
                     today = datetime.now().strftime("%Y-%m-%d")
-                    await db.execute("""
-                        INSERT INTO daily_stats (user_id, date, success_count) 
-                        VALUES (?, ?, 1) 
-                        ON CONFLICT(user_id, date) 
-                        DO UPDATE SET success_count = success_count + 1
-                    """, (user_id, today))
-                    
+                    await db.execute("INSERT INTO daily_stats (user_id, date, success_count) VALUES (?, ?, 1) ON CONFLICT(user_id, date) DO UPDATE SET success_count = success_count + 1", (user_id, today))
                     await add_history(user_id, "sms", number, reward, "success")
                     await db.commit()
-                    
                     cur = await db.execute("SELECT balance_rub FROM users WHERE user_id = ?", (user_id,))
                     bal_row = await cur.fetchone()
                     new_balance = round(bal_row[0] / USD_RATE, 2) if bal_row else 0
-                    
                     vip_text = " (+VIP)" if await is_vip(user_id) else ""
-                    await bot.send_message(
-                        user_id,
-                        f"✅ Холд завершён!\n💰 Начислено: *{reward}${vip_text}* ({reward * USD_RATE}₽)\n💳 Баланс: *{new_balance}$*\n📱 Номер: `{number}`",
-                        parse_mode="Markdown"
-                    )
-                
-                if number_id in pending_rewards:
-                    del pending_rewards[number_id]
+                    await bot.send_message(user_id, f"✅ Холд завершён!\n💰 Начислено: *{reward}${vip_text}* ({reward * USD_RATE}₽)\n💳 Баланс: *{new_balance}$*\n📱 Номер: `{number}`", parse_mode="Markdown")
+                if number_id in pending_rewards: del pending_rewards[number_id]
                 return
-                
         except Exception as e:
             logging.error(f"Попытка {attempt + 1}: ошибка в холде: {e}")
             await asyncio.sleep(0.5)
-    
-    if number_id in pending_rewards:
-        del pending_rewards[number_id]
+    if number_id in pending_rewards: del pending_rewards[number_id]
+
+async def process_qr_hold(qr_id: int, user_id: int, reward: float):
+    hold_minutes = int(await get_setting('hold_minutes'))
+    await asyncio.sleep(hold_minutes * 60)
+    hold_key = f"qr_{qr_id}"
+    if hold_key not in pending_rewards:
+        return
+    for attempt in range(10):
+        try:
+            async with aiosqlite.connect(DB_NAME, timeout=30) as db:
+                await db.execute("PRAGMA busy_timeout=5000")
+                cur = await db.execute("SELECT status FROM numbers WHERE id = ?", (qr_id,))
+                row = await cur.fetchone()
+                if not row:
+                    if hold_key in pending_rewards: del pending_rewards[hold_key]
+                    return
+                status = row[0]
+                if status == 'failed':
+                    if hold_key in pending_rewards: del pending_rewards[hold_key]
+                    return
+                if status == 'qr_hold':
+                    await db.execute("UPDATE users SET balance_rub = balance_rub + ?, total_earned = total_earned + ?, qr_success = qr_success + 1 WHERE user_id = ?", (reward * USD_RATE, reward * USD_RATE, user_id))
+                    await db.execute("UPDATE numbers SET status = 'success', completed_at = CURRENT_TIMESTAMP WHERE id = ?", (qr_id,))
+                    await add_history(user_id, "qr", "QR", reward, "success")
+                    await db.commit()
+                    cur = await db.execute("SELECT balance_rub FROM users WHERE user_id = ?", (user_id,))
+                    bal_row = await cur.fetchone()
+                    new_balance = round(bal_row[0] / USD_RATE, 2) if bal_row else 0
+                    vip_text = " (+VIP)" if await is_vip(user_id) else ""
+                    await bot.send_message(user_id, f"✅ Холд QR завершён!\n💰 Начислено: *{reward}${vip_text}* ({reward * USD_RATE}₽)\n💳 Баланс: *{new_balance}$*", parse_mode="Markdown")
+                if hold_key in pending_rewards: del pending_rewards[hold_key]
+                return
+        except Exception as e:
+            logging.error(f"Попытка {attempt + 1}: ошибка в холде QR: {e}")
+            await asyncio.sleep(0.5)
+    if hold_key in pending_rewards: del pending_rewards[hold_key]
 
 # ==================== УНИВЕРСАЛЬНАЯ ОТМЕНА ====================
 @router.callback_query(F.data == "cancel_action")
@@ -477,7 +462,6 @@ async def start(message: Message):
     user_id = message.from_user.id
     username = message.from_user.username or "нет"
     ref_code = message.text.split()[1] if len(message.text.split()) > 1 else None
-
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         cursor = await db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
         if not await cursor.fetchone():
@@ -488,13 +472,8 @@ async def start(message: Message):
                 ref = await cur.fetchone()
                 if ref and ref[0] != user_id:
                     referred_by = ref[0]
-
-            await db.execute(
-                "INSERT INTO users (user_id, username, referral_code, referred_by) VALUES (?, ?, ?, ?)",
-                (user_id, username, own_ref, referred_by)
-            )
+            await db.execute("INSERT INTO users (user_id, username, referral_code, referred_by) VALUES (?, ?, ?, ?)", (user_id, username, own_ref, referred_by))
             await db.commit()
-
     if await check_subscription(user_id):
         await message.answer("✅ Добро пожаловать!", reply_markup=main_menu())
     else:
@@ -516,70 +495,45 @@ async def group_request(message: Message):
 @router.callback_query(F.data == "request_number")
 async def request_number_from_queue(callback: CallbackQuery):
     entry = await process_next_in_queue("number")
-    
     if not entry:
         await callback.answer("❌ Очередь пуста!", show_alert=True)
         return
-    
     username = entry["username"]
     user_id = entry["user_id"]
     number = entry["number"]
     vip_status = "💎 VIP | " if entry["vip"] else ""
-    
     thread_id = callback.message.message_thread_id
-    
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
-        cur = await db.execute("INSERT INTO numbers (user_id, number, type) VALUES (?, ?, 'sms')", (user_id, number))
+        cur = await db.execute("INSERT INTO numbers (user_id, number, type, thread_id) VALUES (?, ?, 'sms', ?)", (user_id, number, thread_id))
         number_id = cur.lastrowid
         await db.commit()
-    
-    msg = await bot.send_message(
-        GROUP_ID,
-        f"📱 *Номер из очереди*\n{vip_status}👤 @{username} (ID: `{user_id}`)\n🔢 Номер: `{number}`\n🆔 ID: {number_id}\n📊 В очереди: {len(number_queue)} чел.",
-        parse_mode="Markdown",
-        reply_markup=number_action_keyboard(number_id),
-        message_thread_id=thread_id
-    )
-    
+    msg = await bot.send_message(GROUP_ID, f"📱 *Номер из очереди*\n{vip_status}👤 @{username} (ID: `{user_id}`)\n🔢 Номер: `{number}`\n🆔 ID: {number_id}\n📊 В очереди: {len(number_queue)} чел.", parse_mode="Markdown", reply_markup=number_action_keyboard(number_id), message_thread_id=thread_id)
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         await db.execute("UPDATE numbers SET message_id = ? WHERE id = ?", (msg.message_id, number_id))
         await db.commit()
-    
     await bot.send_message(user_id, f"📱 Твой номер `{number}` взят в обработку!", parse_mode="Markdown")
     await callback.answer()
 
 @router.callback_query(F.data == "request_qr")
 async def request_qr_from_queue(callback: CallbackQuery):
     entry = await process_next_in_queue("qr")
-    
     if not entry:
         await callback.answer("❌ Очередь QR пуста!", show_alert=True)
         return
-    
     username = entry["username"]
     user_id = entry["user_id"]
     vip_status = "💎 VIP | " if entry["vip"] else ""
-    
     thread_id = callback.message.message_thread_id
-    
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
-        cur = await db.execute("INSERT INTO numbers (user_id, number, type) VALUES (?, 'QR', 'qr')", (user_id,))
+        cur = await db.execute("INSERT INTO numbers (user_id, number, type, thread_id) VALUES (?, 'QR', 'qr', ?)", (user_id, thread_id))
         qr_id = cur.lastrowid
         await db.execute("UPDATE users SET qr_submitted = qr_submitted + 1 WHERE user_id = ?", (user_id,))
         await db.commit()
-    
     msg_text = f"📱 *QR из очереди*\n{vip_status}👤 @{username}\nuserid:{user_id}\nqrid:{qr_id}\n📊 В очереди: {len(qr_queue)} чел.\n\n*Ответьте фото QR-кода*"
-    
-    sent_msg = await bot.send_message(
-        GROUP_ID, msg_text,
-        parse_mode="Markdown",
-        message_thread_id=thread_id
-    )
-    
+    sent_msg = await bot.send_message(GROUP_ID, msg_text, parse_mode="Markdown", message_thread_id=thread_id)
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         await db.execute("UPDATE numbers SET message_id = ? WHERE id = ?", (sent_msg.message_id, qr_id))
         await db.commit()
-    
     await bot.send_message(user_id, "📱 Твой запрос QR взят в обработку!\nОжидай фотографию QR-кода.")
     await callback.message.delete()
     await callback.answer()
@@ -588,31 +542,22 @@ async def request_qr_from_queue(callback: CallbackQuery):
 @router.message(F.text == "📤 Сдать номер")
 async def start_submit(message: Message, state: FSMContext):
     user_id = message.from_user.id
-
     if not await check_subscription(user_id):
         await message.answer("⚠️ Подпишись на канал:", reply_markup=check_sub_keyboard())
         return
-
     if await get_setting('accepting_enabled') != '1':
         await message.answer("⏸️ Приём номеров временно приостановлен.")
         return
-
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         cur = await db.execute("SELECT is_banned FROM users WHERE user_id = ?", (user_id,))
         row = await cur.fetchone()
         if row and row[0]:
             await message.answer("⛔ Вы заблокированы.")
             return
-
     if await check_spam(user_id):
         await message.answer(f"⏳ Слишком часто! Подождите {SPAM_LIMIT_SECONDS} секунд.")
         return
-
-    await message.answer(
-        "✏️ Введи номер телефона в формате: `+79001234567`\n\nДля отмены нажми кнопку:",
-        parse_mode="Markdown",
-        reply_markup=cancel_keyboard()
-    )
+    await message.answer("✏️ Введи номер телефона в формате: `+79001234567`\n\nДля отмены нажми кнопку:", parse_mode="Markdown", reply_markup=cancel_keyboard())
     await state.set_state(SubmitNumber.enter_number)
 
 @router.message(SubmitNumber.enter_number)
@@ -620,107 +565,68 @@ async def number_entered(message: Message, state: FSMContext):
     number = message.text.strip()
     user_id = message.from_user.id
     username = message.from_user.username or f"id{user_id}"
-
     if not number.startswith("+7") or len(number) != 12:
-        await message.answer(
-            "❌ Неверный формат. Пример: +79001234567\nПопробуй ещё раз или нажми отменить:",
-            reply_markup=cancel_keyboard()
-        )
+        await message.answer("❌ Неверный формат. Пример: +79001234567\nПопробуй ещё раз или нажми отменить:", reply_markup=cancel_keyboard())
         return
-
     if await check_duplicate_number(number):
         await message.answer("❌ Этот номер уже был успешно использован!")
         await state.clear()
         return
-
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
-        await db.execute("UPDATE users SET last_submit_time = ?, numbers_submitted = numbers_submitted + 1 WHERE user_id = ?",
-                         (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id))
+        await db.execute("UPDATE users SET last_submit_time = ?, numbers_submitted = numbers_submitted + 1 WHERE user_id = ?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id))
         await db.commit()
-
     position = await add_to_queue(user_id, username, "number", number)
-    
-    await message.answer(
-        f"✅ Номер `{number}` добавлен в очередь!\n📊 Позиция: *{position}*\n👥 В очереди: {len(number_queue)} чел.",
-        parse_mode="Markdown",
-        reply_markup=main_menu()
-    )
+    await message.answer(f"✅ Номер `{number}` добавлен в очередь!\n📊 Позиция: *{position}*\n👥 В очереди: {len(number_queue)} чел.", parse_mode="Markdown", reply_markup=main_menu())
     await state.clear()
 
 # ==================== СДАТЬ QR ====================
 @router.message(F.text == "📱 Сдать QR")
 async def start_qr(message: Message):
     user_id = message.from_user.id
-
     if not await check_subscription(user_id):
         await message.answer("⚠️ Подпишись на канал:", reply_markup=check_sub_keyboard())
         return
-
     if await get_setting('accepting_enabled') != '1':
         await message.answer("⏸️ Приём временно приостановлен.")
         return
-
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         cur = await db.execute("SELECT is_banned FROM users WHERE user_id = ?", (user_id,))
         row = await cur.fetchone()
         if row and row[0]:
             await message.answer("⛔ Вы заблокированы.")
             return
-
     confirm_keyboard = InlineKeyboardBuilder()
     confirm_keyboard.add(InlineKeyboardButton(text="✅ Подтвердить", callback_data="confirm_qr"))
     confirm_keyboard.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_action"))
-    
-    await message.answer(
-        "📱 Ты хочешь сдать QR?\nНажми *Подтвердить* чтобы продолжить:",
-        parse_mode="Markdown",
-        reply_markup=confirm_keyboard.as_markup()
-    )
+    await message.answer("📱 Ты хочешь сдать QR?\nНажми *Подтвердить* чтобы продолжить:", parse_mode="Markdown", reply_markup=confirm_keyboard.as_markup())
 
 @router.callback_query(F.data == "confirm_qr")
 async def confirm_qr(callback: CallbackQuery):
     user_id = callback.from_user.id
     username = callback.from_user.username or f"id{user_id}"
-    
     position = await add_to_queue(user_id, username, "qr")
-    
-    await callback.message.edit_text(
-        f"✅ Запрос QR добавлен в очередь!\n📊 Позиция: *{position}*\n👥 В очереди: {len(qr_queue)} чел.",
-        parse_mode="Markdown"
-    )
+    await callback.message.edit_text(f"✅ Запрос QR добавлен в очередь!\n📊 Позиция: *{position}*\n👥 В очереди: {len(qr_queue)} чел.", parse_mode="Markdown")
     await callback.answer("✅ Добавлен!")
 
 # ==================== ОБРАБОТКА QR ФОТО ====================
 @router.message(F.photo, F.reply_to_message, F.chat.id == GROUP_ID)
 async def handle_qr_photo(message: Message):
     replied_text = message.reply_to_message.text or ""
-    
     if "QR из очереди" not in replied_text:
         return
-    
     user_match = re.search(r'userid:(\d+)', replied_text)
     qr_match = re.search(r'qrid:(\d+)', replied_text)
-    
     if not user_match or not qr_match:
         await message.reply("❌ Ошибка: не найдены ID в сообщении")
         return
-    
     user_id = int(user_match.group(1))
     qr_id = int(qr_match.group(1))
     photo_id = message.photo[-1].file_id
-
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
-        await db.execute("UPDATE numbers SET photo_id = ?, message_id = ? WHERE id = ?", 
-                        (photo_id, message.message_id, qr_id))
+        await db.execute("UPDATE numbers SET photo_id = ?, message_id = ? WHERE id = ?", (photo_id, message.message_id, qr_id))
         await db.commit()
-
     try:
-        await bot.send_photo(
-            user_id, photo_id,
-            caption="📱 *QR код для сканирования*\nНажми кнопку после сканирования:",
-            parse_mode="Markdown",
-            reply_markup=qr_user_keyboard(qr_id)
-        )
+        await bot.send_photo(user_id, photo_id, caption="📱 *QR код для сканирования*\nНажми кнопку после сканирования:", parse_mode="Markdown", reply_markup=qr_user_keyboard(qr_id))
     except Exception as e:
         await message.reply(f"❌ Не удалось отправить QR пользователю: {e}")
 
@@ -729,133 +635,89 @@ async def handle_qr_photo(message: Message):
 async def code_sent(callback: CallbackQuery):
     number_id = int(callback.data.split("_")[2])
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
-        cur = await db.execute("SELECT user_id, number, message_id FROM numbers WHERE id = ?", (number_id,))
+        cur = await db.execute("SELECT user_id, number FROM numbers WHERE id = ?", (number_id,))
         row = await cur.fetchone()
         if row:
             user_id = row[0]
             await db.execute("UPDATE numbers SET status = 'code_sent' WHERE id = ?", (number_id,))
             await db.commit()
-            
             keyboard = InlineKeyboardBuilder()
             keyboard.add(InlineKeyboardButton(text="📝 Ввести код", callback_data=f"enter_code_{number_id}"))
             keyboard.add(InlineKeyboardButton(text="🔄 Запросить код повторно", callback_data=f"resend_code_user_{number_id}"))
-            
-            await bot.send_message(
-                user_id,
-                f"📨 По номеру `{row[1]}` отправили код.\nВыбери действие:",
-                parse_mode="Markdown",
-                reply_markup=keyboard.as_markup()
-            )
-            
-            thread_id = await get_thread_id(row[2]) if row[2] else None
-            
-            await callback.message.edit_text(
-                callback.message.text + f"\n\n📨 *Код отправлен*",
-                parse_mode="Markdown",
-                reply_markup=number_action_keyboard(number_id)
-            )
+            await bot.send_message(user_id, f"📨 По номеру `{row[1]}` отправили код.\nВыбери действие:", parse_mode="Markdown", reply_markup=keyboard.as_markup())
+            await callback.message.edit_text(callback.message.text + f"\n\n📨 *Код отправлен*", parse_mode="Markdown", reply_markup=number_action_keyboard(number_id))
     await callback.answer("✅ Запрошен код!")
 
-@router.callback_query(F.data.startswith("resend_code_user_"))
-async def resend_code_user(callback: CallbackQuery):
-    number_id = int(callback.data.split("_")[3])
-    
-    async with aiosqlite.connect(DB_NAME, timeout=10) as db:
-        cur = await db.execute("SELECT message_id FROM numbers WHERE id = ?", (number_id,))
-        row = await cur.fetchone()
-        thread_id = await get_thread_id(row[0]) if row and row[0] else None
-    
-    await bot.send_message(
-        GROUP_ID,
-        f"🔄 *Пользователь запросил повторный код*\n🆔 ID: {number_id}",
-        parse_mode="Markdown",
-        message_thread_id=thread_id
-    )
-    
-    await callback.message.edit_text("🔄 Запрос на повторный код отправлен в группу. Ожидай.")
-    await callback.answer("✅ Запрошен повтор!")
-
-@router.callback_query(F.data.startswith("resend_"))
-async def resend_code(callback: CallbackQuery):
+@router.callback_query(F.data.startswith("skip_"))
+async def skip_number(callback: CallbackQuery):
     number_id = int(callback.data.split("_")[1])
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         cur = await db.execute("SELECT user_id, number FROM numbers WHERE id = ?", (number_id,))
         row = await cur.fetchone()
         if row:
-            await bot.send_message(row[0], f"🔄 Запросили повторный код для `{row[1]}`", parse_mode="Markdown")
+            user_id = row[0]
+            number = row[1]
+            if number_id in pending_rewards:
+                pending_rewards[number_id]["task"].cancel()
+                del pending_rewards[number_id]
+            await db.execute("UPDATE numbers SET status = 'skipped' WHERE id = ?", (number_id,))
+            await add_history(user_id, "sms", number, 0, "skipped")
+            await db.commit()
+            await bot.send_message(user_id, f"⏭ Ваш номер `{number}` пропущен.\n\nВозможные причины:\n• Номер заблокирован\n• Слишком много попыток кода\n• Неверный код\n\nПопробуйте сдать другой номер.", parse_mode="Markdown")
+            await callback.message.edit_text(callback.message.text + f"\n\n⏭ *НОМЕР ПРОПУЩЕН*", parse_mode="Markdown")
+    try: await callback.answer("⏭ Номер пропущен")
+    except: pass
+
+@router.callback_query(F.data.startswith("resend_code_user_"))
+async def resend_code_user(callback: CallbackQuery):
+    number_id = int(callback.data.split("_")[3])
+    async with aiosqlite.connect(DB_NAME, timeout=10) as db:
+        cur = await db.execute("SELECT thread_id FROM numbers WHERE id = ?", (number_id,))
+        row = await cur.fetchone()
+        thread_id = row[0] if row else None
+    await bot.send_message(GROUP_ID, f"🔄 *Пользователь запросил повторный код*\n🆔 ID: {number_id}", parse_mode="Markdown", message_thread_id=thread_id)
+    await callback.message.edit_text("🔄 Запрос на повторный код отправлен в группу. Ожидай.")
     await callback.answer("✅ Запрошен повтор!")
 
 @router.callback_query(F.data.startswith("success_"))
 async def number_success(callback: CallbackQuery):
     number_id = int(callback.data.split("_")[1])
-    
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         cur = await db.execute("SELECT user_id, number FROM numbers WHERE id = ?", (number_id,))
         row = await cur.fetchone()
         if row:
             user_id = row[0]
             reward = float(await get_setting('price_per_number'))
-            
-            if await is_vip(user_id):
-                reward += float(await get_setting('vip_bonus'))
-
+            if await is_vip(user_id): reward += float(await get_setting('vip_bonus'))
             await db.execute("UPDATE numbers SET status = 'success_hold' WHERE id = ?", (number_id,))
             await db.commit()
-
             hold_minutes = await get_setting('hold_minutes')
-            await bot.send_message(
-                user_id,
-                f"🎉 Номер `{row[1]}` отмечен как успешный!\n"
-                f"💰 Сумма *{reward}$* будет начислена через {hold_minutes} мин.\n"
-                f"⏳ Ожидайте...",
-                parse_mode="Markdown"
-            )
-            
-            await callback.message.edit_text(
-                callback.message.text + f"\n\n✅ *ВСТАЛ!* (+{reward}$)\n⏳ Холд {hold_minutes} мин...",
-                parse_mode="Markdown",
-                reply_markup=number_action_keyboard(number_id)
-            )
-            
+            await bot.send_message(user_id, f"🎉 Номер `{row[1]}` отмечен как успешный!\n💰 Сумма *{reward}$* будет начислена через {hold_minutes} мин.\n⏳ Ожидайте...", parse_mode="Markdown")
+            await callback.message.edit_text(callback.message.text + f"\n\n✅ *ВСТАЛ!*", parse_mode="Markdown", reply_markup=number_action_keyboard(number_id))
             task = asyncio.create_task(process_reward_after_hold(number_id, user_id, row[1], reward))
-            pending_rewards[number_id] = {
-                "user_id": user_id,
-                "reward": reward,
-                "task": task,
-                "number": row[1]
-            }
-    
-    await callback.answer("✅ Успешно! Ожидание холда...")
+            pending_rewards[number_id] = {"user_id": user_id, "reward": reward, "task": task, "number": row[1]}
+    try: await callback.answer("✅ Успешно!")
+    except: pass
 
 @router.callback_query(F.data.startswith("failed_"))
 async def number_failed(callback: CallbackQuery):
     number_id = int(callback.data.split("_")[1])
-    
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
-        cur = await db.execute("SELECT user_id, number, status FROM numbers WHERE id = ?", (number_id,))
+        cur = await db.execute("SELECT user_id, number FROM numbers WHERE id = ?", (number_id,))
         row = await cur.fetchone()
         if row:
             user_id = row[0]
-            
             if number_id in pending_rewards:
                 pending_rewards[number_id]["task"].cancel()
                 hold_reward = pending_rewards[number_id]["reward"]
                 del pending_rewards[number_id]
-                
-                await bot.send_message(
-                    user_id,
-                    f"❌ Номер `{row[1]}` слетел до завершения холда!\n"
-                    f"💰 Начисление *{hold_reward}$* отменено.",
-                    parse_mode="Markdown"
-                )
+                await bot.send_message(user_id, f"❌ Номер `{row[1]}` слетел до завершения холда!\n💰 Начисление *{hold_reward}$* отменено.", parse_mode="Markdown")
             else:
                 await bot.send_message(user_id, f"❌ Номер `{row[1]}` не подошёл.", parse_mode="Markdown")
-            
             await db.execute("UPDATE numbers SET status = 'failed' WHERE id = ?", (number_id,))
             await add_history(user_id, "sms", row[1], 0, "failed")
             await db.commit()
             await callback.message.edit_text(callback.message.text + "\n\n❌ *Номер слетел*", parse_mode="Markdown")
-    
     await callback.answer()
 
 @router.callback_query(F.data.startswith("password_"))
@@ -868,17 +730,10 @@ async def password_set(callback: CallbackQuery):
             user_id = row[0]
             await db.execute("UPDATE numbers SET status = 'password' WHERE id = ?", (number_id,))
             await db.commit()
-            
             keyboard = InlineKeyboardBuilder()
             keyboard.add(InlineKeyboardButton(text="🔒 Ввести пароль", callback_data=f"enter_pass_{number_id}"))
             keyboard.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_action"))
-            
-            await bot.send_message(
-                user_id,
-                f"🔒 На номере `{row[1]}` установлен пароль.\nНажми кнопку чтобы ввести:",
-                parse_mode="Markdown",
-                reply_markup=keyboard.as_markup()
-            )
+            await bot.send_message(user_id, f"🔒 На номере `{row[1]}` установлен пароль.\nНажми кнопку чтобы ввести:", parse_mode="Markdown", reply_markup=keyboard.as_markup())
             await callback.message.edit_text(callback.message.text + "\n\n🔒 *Пароль*", parse_mode="Markdown")
     await callback.answer()
 
@@ -887,33 +742,23 @@ async def password_set(callback: CallbackQuery):
 async def qr_scanned(callback: CallbackQuery):
     parts = callback.data.split("_")
     qr_id = int(parts[2])
-    
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
-        cur = await db.execute("SELECT user_id, message_id FROM numbers WHERE id = ?", (qr_id,))
+        cur = await db.execute("SELECT user_id, thread_id FROM numbers WHERE id = ?", (qr_id,))
         row = await cur.fetchone()
         if row:
-            thread_id = await get_thread_id(row[1]) if row[1] else None
-            
-            await bot.send_message(
-                GROUP_ID,
-                f"📱 *QR отсканирован*\n👤 userid:{row[0]}\nqrid:{qr_id}\n\nПодтвердите результат:",
-                parse_mode="Markdown",
-                reply_markup=qr_result_keyboard(qr_id),
-                message_thread_id=thread_id
-            )
-    
+            thread_id = row[1]
+            await bot.send_message(GROUP_ID, f"📱 *QR отсканирован*\n👤 userid:{row[0]}\nqrid:{qr_id}\n\nПодтвердите результат:", parse_mode="Markdown", reply_markup=qr_result_keyboard(qr_id), message_thread_id=thread_id)
     await callback.message.edit_caption("✅ QR успешно отсканирован! Ожидайте подтверждения.", reply_markup=None)
-    await callback.answer("✅ Отсканирован!")
+    try: await callback.answer("✅ Отсканирован!")
+    except: pass
 
 @router.callback_query(F.data.startswith("qr_cancel_"))
 async def qr_cancel(callback: CallbackQuery):
     parts = callback.data.split("_")
     qr_id = int(parts[2])
-    
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         await db.execute("UPDATE numbers SET status = 'cancelled' WHERE id = ?", (qr_id,))
         await db.commit()
-    
     await callback.message.edit_caption("❌ Сканирование отменено.", reply_markup=None)
     await callback.answer("Отменено")
 
@@ -921,50 +766,49 @@ async def qr_cancel(callback: CallbackQuery):
 async def qr_success(callback: CallbackQuery):
     parts = callback.data.split("_")
     qr_id = int(parts[2])
-    
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         cur = await db.execute("SELECT user_id FROM numbers WHERE id = ?", (qr_id,))
         row = await cur.fetchone()
         if row:
             user_id = row[0]
             reward = float(await get_setting('price_per_qr'))
-            if await is_vip(user_id):
-                reward += float(await get_setting('vip_bonus'))
-
-            await db.execute(
-                "UPDATE users SET balance_rub = balance_rub + ?, total_earned = total_earned + ?, qr_success = qr_success + 1 WHERE user_id = ?",
-                (reward * USD_RATE, reward * USD_RATE, user_id))
-            await db.execute("UPDATE numbers SET status = 'success', completed_at = CURRENT_TIMESTAMP WHERE id = ?", (qr_id,))
-            await add_history(user_id, "qr", "QR", reward, "success")
+            if await is_vip(user_id): reward += float(await get_setting('vip_bonus'))
+            await db.execute("UPDATE numbers SET status = 'qr_hold' WHERE id = ?", (qr_id,))
             await db.commit()
-
-            await bot.send_message(user_id, f"🎉 QR авторизация успешна!\n💰 Начислено: *{reward}$*", parse_mode="Markdown")
-    
-    await callback.message.edit_text(callback.message.text + "\n\n✅ *ВСТАЛ!*", parse_mode="Markdown")
-    await callback.answer("✅ Успешно!")
+            hold_minutes = await get_setting('hold_minutes')
+            await bot.send_message(user_id, f"🎉 QR отмечен как успешный!\n💰 Сумма *{reward}$* через {hold_minutes} мин.\n⏳ Ожидайте...", parse_mode="Markdown")
+            await callback.message.edit_text(callback.message.text + f"\n\n✅ *ВСТАЛ!*", parse_mode="Markdown")
+            task = asyncio.create_task(process_qr_hold(qr_id, user_id, reward))
+            pending_rewards[f"qr_{qr_id}"] = {"user_id": user_id, "reward": reward, "task": task, "number": "QR", "type": "qr"}
+    try: await callback.answer("✅ Успешно!")
+    except: pass
 
 @router.callback_query(F.data.startswith("qr_failed_"))
 async def qr_failed(callback: CallbackQuery):
     parts = callback.data.split("_")
     qr_id = int(parts[2])
-    
+    hold_key = f"qr_{qr_id}"
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         cur = await db.execute("SELECT user_id FROM numbers WHERE id = ?", (qr_id,))
         row = await cur.fetchone()
         if row:
+            if hold_key in pending_rewards:
+                pending_rewards[hold_key]["task"].cancel()
+                hold_reward = pending_rewards[hold_key]["reward"]
+                del pending_rewards[hold_key]
+                await bot.send_message(row[0], f"❌ QR слетел до холда!\n💰 Начисление *{hold_reward}$* отменено.", parse_mode="Markdown")
+            else:
+                await bot.send_message(row[0], "❌ QR не встал.")
             await db.execute("UPDATE numbers SET status = 'failed' WHERE id = ?", (qr_id,))
             await add_history(row[0], "qr", "QR", 0, "failed")
             await db.commit()
-            await bot.send_message(row[0], "❌ QR не встал, попробуйте заново.")
-    
-    await callback.message.edit_text(callback.message.text + "\n\n❌ *Не встал*", parse_mode="Markdown")
-    await callback.answer("❌ Не встал")
+    try: await callback.message.edit_text(callback.message.text + "\n\n❌ *Не встал*", parse_mode="Markdown")
+    except: pass
 
 @router.callback_query(F.data.startswith("qr_password_"))
 async def qr_password(callback: CallbackQuery):
     parts = callback.data.split("_")
     qr_id = int(parts[2])
-    
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         cur = await db.execute("SELECT user_id FROM numbers WHERE id = ?", (qr_id,))
         row = await cur.fetchone()
@@ -972,21 +816,15 @@ async def qr_password(callback: CallbackQuery):
             keyboard = InlineKeyboardBuilder()
             keyboard.add(InlineKeyboardButton(text="🔒 Ввести пароль", callback_data=f"enter_qr_pass_{qr_id}"))
             keyboard.add(InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_action"))
-            await bot.send_message(
-                row[0],
-                "🔒 На QR установлен пароль.\nНажми кнопку чтобы ввести:",
-                parse_mode="Markdown",
-                reply_markup=keyboard.as_markup()
-            )
-    
+            await bot.send_message(row[0], "🔒 На QR установлен пароль.\nНажми кнопку чтобы ввести:", parse_mode="Markdown", reply_markup=keyboard.as_markup())
     await callback.message.edit_text(callback.message.text + "\n\n🔒 *Пароль*", parse_mode="Markdown")
-    await callback.answer("🔒 Пароль")
+    try: await callback.answer("🔒 Пароль")
+    except: pass
 
 @router.callback_query(F.data.startswith("enter_qr_pass_"))
 async def start_qr_password_entry(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split("_")
     qr_id = int(parts[3])
-    
     await state.update_data(qr_id=qr_id)
     await callback.message.answer("✏️ Введи пароль:", reply_markup=cancel_keyboard())
     await state.set_state(CodeEntry.waiting_for_qr_password)
@@ -999,23 +837,13 @@ async def qr_password_entered(message: Message, state: FSMContext):
     qr_id = data["qr_id"]
     user_id = message.from_user.id
     username = message.from_user.username or f"id{user_id}"
-    
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
-        cur = await db.execute("SELECT message_id FROM numbers WHERE id = ?", (qr_id,))
+        cur = await db.execute("SELECT thread_id FROM numbers WHERE id = ?", (qr_id,))
         row = await cur.fetchone()
-        thread_id = await get_thread_id(row[0]) if row and row[0] else None
-        
+        thread_id = row[0] if row else None
         await db.execute("UPDATE numbers SET status = 'password_entered' WHERE id = ?", (qr_id,))
         await db.commit()
-    
-    await bot.send_message(
-        GROUP_ID,
-        f"🔒 *Пароль от QR*\n👤 @{username}\n🔑 Пароль: `{password}`\nqrid:{qr_id}",
-        parse_mode="Markdown",
-        reply_markup=qr_result_keyboard(qr_id),
-        message_thread_id=thread_id
-    )
-    
+    await bot.send_message(GROUP_ID, f"🔒 *Пароль от QR*\n👤 @{username}\n🔑 Пароль: `{password}`\nqrid:{qr_id}", parse_mode="Markdown", reply_markup=qr_result_keyboard(qr_id), message_thread_id=thread_id)
     await message.answer("✅ Пароль отправлен!", reply_markup=main_menu())
     await state.clear()
 
@@ -1035,27 +863,15 @@ async def code_entered(message: Message, state: FSMContext):
     number_id = data["number_id"]
     user_id = message.from_user.id
     username = message.from_user.username or f"id{user_id}"
-    
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
-        cur = await db.execute("SELECT number, message_id FROM numbers WHERE id = ? AND user_id = ?", (number_id, user_id))
+        cur = await db.execute("SELECT number, thread_id FROM numbers WHERE id = ? AND user_id = ?", (number_id, user_id))
         row = await cur.fetchone()
         if not row:
-            await message.answer("❌ Номер не найден!")
-            await state.clear()
-            return
-        number = row[0]
-        thread_id = await get_thread_id(row[1]) if row[1] else None
+            await message.answer("❌ Номер не найден!"); await state.clear(); return
+        number = row[0]; thread_id = row[1]
         await db.execute("UPDATE numbers SET status = 'code_entered' WHERE id = ?", (number_id,))
         await db.commit()
-    
-    await bot.send_message(
-        GROUP_ID,
-        f"📩 *Введён код*\n👤 @{username} (ID: `{user_id}`)\n🔢 Номер: `{number}`\n🔑 Код: `{code}`\n🆔 ID: {number_id}",
-        parse_mode="Markdown",
-        reply_markup=number_action_keyboard(number_id),
-        message_thread_id=thread_id
-    )
-    
+    await bot.send_message(GROUP_ID, f"📩 *Введён код*\n👤 @{username} (ID: `{user_id}`)\n🔢 Номер: `{number}`\n🔑 Код: `{code}`\n🆔 ID: {number_id}", parse_mode="Markdown", reply_markup=number_action_keyboard(number_id), message_thread_id=thread_id)
     await message.answer("✅ Код отправлен!", reply_markup=main_menu())
     await state.clear()
 
@@ -1074,27 +890,15 @@ async def password_entered(message: Message, state: FSMContext):
     number_id = data["number_id"]
     user_id = message.from_user.id
     username = message.from_user.username or f"id{user_id}"
-    
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
-        cur = await db.execute("SELECT number, message_id FROM numbers WHERE id = ? AND user_id = ?", (number_id, user_id))
+        cur = await db.execute("SELECT number, thread_id FROM numbers WHERE id = ? AND user_id = ?", (number_id, user_id))
         row = await cur.fetchone()
         if not row:
-            await message.answer("❌ Номер не найден!")
-            await state.clear()
-            return
-        number = row[0]
-        thread_id = await get_thread_id(row[1]) if row[1] else None
+            await message.answer("❌ Номер не найден!"); await state.clear(); return
+        number = row[0]; thread_id = row[1]
         await db.execute("UPDATE numbers SET status = 'password_entered' WHERE id = ?", (number_id,))
         await db.commit()
-    
-    await bot.send_message(
-        GROUP_ID,
-        f"🔒 *Введён пароль*\n👤 @{username} (ID: `{user_id}`)\n🔢 Номер: `{number}`\n🔑 Пароль: `{password}`\n🆔 ID: {number_id}",
-        parse_mode="Markdown",
-        reply_markup=number_action_keyboard(number_id),
-        message_thread_id=thread_id
-    )
-    
+    await bot.send_message(GROUP_ID, f"🔒 *Введён пароль*\n👤 @{username} (ID: `{user_id}`)\n🔢 Номер: `{number}`\n🔑 Пароль: `{password}`\n🆔 ID: {number_id}", parse_mode="Markdown", reply_markup=number_action_keyboard(number_id), message_thread_id=thread_id)
     await message.answer("✅ Пароль отправлен!", reply_markup=main_menu())
     await state.clear()
 
@@ -1103,28 +907,17 @@ async def password_entered(message: Message, state: FSMContext):
 async def profile(message: Message):
     user_id = message.from_user.id
     vip = await is_vip(user_id)
-    
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         cur = await db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,))
         if not await cur.fetchone():
-            await message.answer("❌ Вы не зарегистрированы. Напишите /start")
-            return
-            
-        cur = await db.execute(
-            "SELECT balance_rub, total_earned, numbers_submitted, numbers_success, qr_submitted, qr_success, referral_code, vip_until FROM users WHERE user_id = ?",
-            (user_id,))
+            await message.answer("❌ Вы не зарегистрированы. Напишите /start"); return
+        cur = await db.execute("SELECT balance_rub, total_earned, numbers_submitted, numbers_success, qr_submitted, qr_success, referral_code, vip_until FROM users WHERE user_id = ?", (user_id,))
         row = await cur.fetchone()
-        
         if not row:
-            await message.answer("❌ Ошибка загрузки профиля")
-            return
-            
+            await message.answer("❌ Ошибка загрузки профиля"); return
         balance_usd = round(row[0] / USD_RATE, 2)
         vip_status = f"💎 VIP до {row[7]}" if vip else "❌ Не активен"
-        
-        await message.answer(
-            f"👤 *Профиль*\n\n⭐ Статус: *{vip_status}*\n💰 Баланс: *{balance_usd}$*\n💵 Заработано: *{round(row[1] / USD_RATE, 2)}$*\n📤 Номеров: *{row[2]}* (✅{row[3]})\n📱 QR: *{row[4]}* (✅{row[5]})\n🔗 Реф. код: `{row[6]}`\n\nМин. вывод: {MIN_WITHDRAW_USD}$",
-            parse_mode="Markdown", reply_markup=profile_keyboard())
+        await message.answer(f"👤 *Профиль*\n\n⭐ Статус: *{vip_status}*\n💰 Баланс: *{balance_usd}$*\n💵 Заработано: *{round(row[1] / USD_RATE, 2)}$*\n📤 Номеров: *{row[2]}* (✅{row[3]})\n📱 QR: *{row[4]}* (✅{row[5]})\n🔗 Реф. код: `{row[6]}`\n\nМин. вывод: {MIN_WITHDRAW_USD}$", parse_mode="Markdown", reply_markup=profile_keyboard())
 
 # ==================== ИСТОРИЯ ОПЕРАЦИЙ ====================
 @router.callback_query(F.data.startswith("history_"))
@@ -1132,46 +925,24 @@ async def show_history(callback: CallbackQuery):
     page = int(callback.data.split("_")[1])
     user_id = callback.from_user.id
     per_page = 5
-    
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         cur = await db.execute("SELECT COUNT(*) FROM history WHERE user_id = ?", (user_id,))
         total = (await cur.fetchone())[0]
-        
         if total == 0:
-            await callback.message.edit_text(
-                "📋 *История операций*\n\nПока нет операций.",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardBuilder().add(
-                    InlineKeyboardButton(text="❌ Закрыть", callback_data="cancel_action")
-                ).as_markup()
-            )
-            await callback.answer()
-            return
-        
+            await callback.message.edit_text("📋 *История операций*\n\nПока нет операций.", parse_mode="Markdown", reply_markup=InlineKeyboardBuilder().add(InlineKeyboardButton(text="❌ Закрыть", callback_data="cancel_action")).as_markup())
+            await callback.answer(); return
         total_pages = (total + per_page - 1) // per_page
         offset = (page - 1) * per_page
-        
-        cur = await db.execute(
-            "SELECT type, number, amount_usd, status, created_at FROM history WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
-            (user_id, per_page, offset)
-        )
+        cur = await db.execute("SELECT type, number, amount_usd, status, created_at FROM history WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?", (user_id, per_page, offset))
         rows = await cur.fetchall()
-    
     text = f"📋 *История операций* (стр. {page}/{total_pages})\n\n"
-    
     for type_, number, amount, status, date in rows:
         icon = "📤" if type_ == "sms" else "📱"
-        status_icon = {"success": "✅", "failed": "❌", "pending": "⏳"}.get(status, "❓")
+        status_icon = {"success": "✅", "failed": "❌", "skipped": "⏭"}.get(status, "❓")
         amount_text = f"+{amount}$" if status == "success" else "0$"
         date_text = date[:16] if date else "???"
-        
         text += f"{icon} {status_icon} `{number}` — *{amount_text}*\n└ {date_text}\n\n"
-    
-    await callback.message.edit_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=history_keyboard(page, total_pages)
-    )
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=history_keyboard(page, total_pages))
     await callback.answer()
 
 # ==================== VIP СТАТУС ====================
@@ -1191,19 +962,14 @@ async def buy_vip(callback: CallbackQuery):
     user_id = callback.from_user.id
     days = int(callback.data.split("_")[2])
     price = 5 if days == 7 else 15
-    
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         cur = await db.execute("SELECT balance_rub FROM users WHERE user_id = ?", (user_id,))
         row = await cur.fetchone()
         if not row or round(row[0] / USD_RATE, 2) < price:
-            await callback.answer(f"❌ Недостаточно средств! Нужно {price}$", show_alert=True)
-            return
-        
+            await callback.answer(f"❌ Недостаточно средств! Нужно {price}$", show_alert=True); return
         vip_until = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-        await db.execute("UPDATE users SET balance_rub = balance_rub - ?, is_vip = 1, vip_until = ? WHERE user_id = ?",
-                        (price * USD_RATE, vip_until, user_id))
+        await db.execute("UPDATE users SET balance_rub = balance_rub - ?, is_vip = 1, vip_until = ? WHERE user_id = ?", (price * USD_RATE, vip_until, user_id))
         await db.commit()
-    
     await callback.message.edit_text(f"✅ VIP активирован на *{days} дней*!\nДо: *{vip_until}*\n💰 Списано: {price}$", parse_mode="Markdown")
     await callback.answer("🎉 VIP активирован!")
 
@@ -1218,30 +984,20 @@ async def activate_promo_start(callback: CallbackQuery, state: FSMContext):
 async def activate_promo(message: Message, state: FSMContext):
     promo = message.text.strip().upper()
     user_id = message.from_user.id
-    
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         cur = await db.execute("SELECT id, bonus_usd, max_uses, used_count, expires_at, is_active FROM promocodes WHERE code = ?", (promo,))
         row = await cur.fetchone()
-        
-        if not row:
-            await message.answer("❌ Промокод не найден!"); await state.clear(); return
-        
+        if not row: await message.answer("❌ Промокод не найден!"); await state.clear(); return
         pid, bonus, max_uses, used, expires, active = row
-        
         if not active: await message.answer("❌ Отключён!"); await state.clear(); return
         if max_uses > 0 and used >= max_uses: await message.answer("❌ Закончился!"); await state.clear(); return
-        if expires and datetime.strptime(expires, "%Y-%m-%d %H:%M:%S") < datetime.now():
-            await message.answer("❌ Истёк!"); await state.clear(); return
-        
+        if expires and datetime.strptime(expires, "%Y-%m-%d %H:%M:%S") < datetime.now(): await message.answer("❌ Истёк!"); await state.clear(); return
         cur = await db.execute("SELECT id FROM promocode_uses WHERE user_id = ? AND promocode = ?", (user_id, promo))
-        if await cur.fetchone():
-            await message.answer("❌ Уже использован!"); await state.clear(); return
-        
+        if await cur.fetchone(): await message.answer("❌ Уже использован!"); await state.clear(); return
         await db.execute("UPDATE users SET balance_rub = balance_rub + ? WHERE user_id = ?", (bonus * USD_RATE, user_id))
         await db.execute("UPDATE promocodes SET used_count = used_count + 1 WHERE id = ?", (pid,))
         await db.execute("INSERT INTO promocode_uses (user_id, promocode) VALUES (?, ?)", (user_id, promo))
         await db.commit()
-    
     await message.answer(f"🎉 Промокод активирован!\n💰 Начислено: *{bonus}$*", parse_mode="Markdown", reply_markup=main_menu())
     await state.clear()
 
@@ -1253,96 +1009,59 @@ async def start_withdraw(callback: CallbackQuery, state: FSMContext):
         cur = await db.execute("SELECT balance_rub FROM users WHERE user_id = ?", (user_id,))
         row = await cur.fetchone()
         balance_usd = round(row[0] / USD_RATE, 2) if row else 0
-
     if balance_usd < MIN_WITHDRAW_USD:
-        await callback.answer(f"❌ Мин. сумма: {MIN_WITHDRAW_USD}$", show_alert=True)
-        return
-
-    await callback.message.answer(
-        f"💰 Доступно: *{balance_usd}$*\n\n✏️ Введи сумму для вывода (целое число):",
-        parse_mode="Markdown",
-        reply_markup=cancel_keyboard()
-    )
+        await callback.answer(f"❌ Мин. сумма: {MIN_WITHDRAW_USD}$", show_alert=True); return
+    await callback.message.answer(f"💰 Доступно: *{balance_usd}$*\n\n✏️ Введи сумму для вывода (целое число):", parse_mode="Markdown", reply_markup=cancel_keyboard())
     await state.set_state(WithdrawStates.amount)
 
 @router.message(WithdrawStates.amount)
 async def withdraw_process(message: Message, state: FSMContext):
     user_id = message.from_user.id
     username = message.from_user.username or f"id{user_id}"
-
     try:
         amount = float(message.text.strip())
-        if amount != int(amount):
-            await message.answer("❌ Введи целое число!", reply_markup=cancel_keyboard()); return
-    except:
-        await message.answer("❌ Введи число!", reply_markup=cancel_keyboard()); return
-
+        if amount != int(amount): await message.answer("❌ Введи целое число!", reply_markup=cancel_keyboard()); return
+    except: await message.answer("❌ Введи число!", reply_markup=cancel_keyboard()); return
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         cur = await db.execute("SELECT balance_rub FROM users WHERE user_id = ?", (user_id,))
         balance_usd = round((await cur.fetchone())[0] / USD_RATE, 2)
-
-    if amount < MIN_WITHDRAW_USD or amount > balance_usd:
-        await message.answer(f"❌ Сумма от {MIN_WITHDRAW_USD}$ до {balance_usd}$"); return
-
+    if amount < MIN_WITHDRAW_USD or amount > balance_usd: await message.answer(f"❌ Сумма от {MIN_WITHDRAW_USD}$ до {balance_usd}$"); return
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         await db.execute("UPDATE users SET balance_rub = balance_rub - ? WHERE user_id = ?", (amount * USD_RATE, user_id))
         await db.commit()
-
     for admin_id in ADMIN_IDS:
         try:
-            admin_msg = await bot.send_message(admin_id,
-                f"💸 *Заявка на вывод # {user_id}*\n\n👤 @{username} (ID: `{user_id}`)\n💰 Сумма: *{amount}$*\n\n*Ответьте на это сообщение ссылкой на чек*",
-                parse_mode="Markdown")
+            admin_msg = await bot.send_message(admin_id, f"💸 *Заявка на вывод # {user_id}*\n\n👤 @{username} (ID: `{user_id}`)\n💰 Сумма: *{amount}$*\n\n*Ответьте на это сообщение ссылкой на чек*", parse_mode="Markdown")
             async with aiosqlite.connect(DB_NAME, timeout=10) as db:
                 await db.execute("INSERT INTO withdraw_requests (user_id, amount_usd, admin_msg_id) VALUES (?, ?, ?)", (user_id, amount, admin_msg.message_id))
                 await db.commit()
         except: pass
-
     await message.answer(f"✅ Заявка на вывод *{amount}$* создана!\nОжидайте чек.", parse_mode="Markdown", reply_markup=main_menu())
     await state.clear()
 
 @router.message(F.reply_to_message)
 async def admin_check_response(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-
+    if message.from_user.id not in ADMIN_IDS: return
     replied_text = message.reply_to_message.text or ""
-    
     logging.info(f"Reply от админа. Текст: {replied_text[:100]}")
-    
-    if "Заявка на вывод #" not in replied_text:
-        return
-
+    if "Заявка на вывод #" not in replied_text: return
     match = re.search(r'#\s*(\d+)', replied_text)
     if not match:
         match = re.search(r'ID: `(\d+)`', replied_text)
         if not match:
             logging.error("Не удалось найти user_id")
-            await message.reply("❌ Не удалось найти ID пользователя в заявке.")
-            return
-    
+            await message.reply("❌ Не удалось найти ID пользователя в заявке."); return
     user_id = int(match.group(1))
-    
     match_sum = re.search(r'Сумма: \*([\d.]+)\$\*', replied_text)
     amount = match_sum.group(1) if match_sum else "?"
-
     check_text = message.text or message.caption or "Чек отправлен"
-    
     logging.info(f"Отправка чека пользователю {user_id} на сумму {amount}$")
-    
     try:
-        await bot.send_message(
-            user_id,
-            f"💸 *Вывод на {amount}$ выполнен!*\n\n📝 Чек: {check_text}\n\nСпасибо за работу! 🎉",
-            parse_mode="Markdown"
-        )
+        await bot.send_message(user_id, f"💸 *Вывод на {amount}$ выполнен!*\n\n📝 Чек: {check_text}\n\nСпасибо за работу! 🎉", parse_mode="Markdown")
         await message.reply(f"✅ Чек отправлен пользователю `{user_id}`", parse_mode="Markdown")
-        
         async with aiosqlite.connect(DB_NAME, timeout=10) as db:
             await db.execute("UPDATE withdraw_requests SET status = 'completed' WHERE admin_msg_id = ?", (message.reply_to_message.message_id,))
             await db.commit()
-            logging.info(f"Заявка от {user_id} отмечена как выполненная")
-            
     except Exception as e:
         logging.error(f"Ошибка отправки чека: {e}")
         await message.reply(f"❌ Ошибка отправки пользователю: {e}")
@@ -1351,62 +1070,34 @@ async def admin_check_response(message: Message):
 @router.message(F.text == "🏅 Топ недели")
 async def top_week(message: Message):
     week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-    
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         cur = await db.execute("SELECT COUNT(*) FROM daily_stats WHERE date >= ?", (week_ago,))
         count = (await cur.fetchone())[0]
-        
-        if count == 0:
-            await message.answer("🏅 Топ недели пуст.")
-            return
-        
-        cur = await db.execute("""
-            SELECT user_id, SUM(success_count) as total 
-            FROM daily_stats 
-            WHERE date >= ? 
-            GROUP BY user_id 
-            ORDER BY total DESC 
-            LIMIT 10
-        """, (week_ago,))
+        if count == 0: await message.answer("🏅 Топ недели пуст."); return
+        cur = await db.execute("SELECT user_id, SUM(success_count) as total FROM daily_stats WHERE date >= ? GROUP BY user_id ORDER BY total DESC LIMIT 10", (week_ago,))
         rows = await cur.fetchall()
-    
-    if not rows:
-        await message.answer("🏅 Топ недели пуст.")
-        return
-    
+    if not rows: await message.answer("🏅 Топ недели пуст."); return
     text = "🏅 *Топ недели*\n\n"
     medals = ["🥇", "🥈", "🥉"]
     for i, (uid, count) in enumerate(rows, 1):
         medal = medals[i-1] if i <= 3 else f"{i}."
         text += f"{medal} ID: `{uid}` — {count} номеров\n"
-    
     await message.answer(text, parse_mode="Markdown")
 
 # ==================== РЕФЕРАЛЬНАЯ ПРОГРАММА ====================
 @router.message(F.text == "🎁 Реферальная программа")
 async def referral(message: Message):
     user_id = message.from_user.id
-    
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
         cur = await db.execute("SELECT referral_code FROM users WHERE user_id = ?", (user_id,))
         row = await cur.fetchone()
-        
-        if not row:
-            await message.answer("❌ Вы не зарегистрированы. Напишите /start")
-            return
-            
-        if not row[0]:
-            await message.answer("❌ Ошибка: нет реферального кода")
-            return
-            
+        if not row: await message.answer("❌ Вы не зарегистрированы. Напишите /start"); return
+        if not row[0]: await message.answer("❌ Ошибка: нет реферального кода"); return
         ref_code = row[0]
         ref_cur = await db.execute("SELECT COUNT(*) FROM users WHERE referred_by = ?", (user_id,))
         ref_count = (await ref_cur.fetchone())[0]
         ref_bonus = await get_setting('referral_bonus')
-        
-        await message.answer(
-            f"🎁 *Реферальная программа*\n\n🔗 Код: `{ref_code}`\n👥 Приглашено: *{ref_count}*\n💰 Бонус: *{ref_bonus}$* за успешный номер реферала",
-            parse_mode="Markdown", reply_markup=referral_keyboard(ref_code))
+        await message.answer(f"🎁 *Реферальная программа*\n\n🔗 Код: `{ref_code}`\n👥 Приглашено: *{ref_count}*\n💰 Бонус: *{ref_bonus}$* за успешный номер реферала", parse_mode="Markdown", reply_markup=referral_keyboard(ref_code))
 
 # ==================== ТЕХ ПОДДЕРЖКА ====================
 @router.message(F.text == "🆘 Тех поддержка")
@@ -1425,29 +1116,21 @@ async def support_send(message: Message, state: FSMContext):
 @router.message(Command("hold"))
 async def check_hold(message: Message):
     user_id = message.from_user.id
-    
     user_holds = []
     for nid, data in pending_rewards.items():
         if data["user_id"] == user_id:
             user_holds.append(f"🆔 {nid}: {data['number']} — {data['reward']}$")
-    
-    if user_holds:
-        await message.answer("⏳ *Активные холды:*\n\n" + "\n".join(user_holds), parse_mode="Markdown")
-    else:
-        await message.answer("✅ Нет активных холдов.")
+    if user_holds: await message.answer("⏳ *Активные холды:*\n\n" + "\n".join(user_holds), parse_mode="Markdown")
+    else: await message.answer("✅ Нет активных холдов.")
 
 @router.message(F.text == "⏳ Активные холды")
 async def admin_holds(message: Message):
     if message.from_user.id not in ADMIN_IDS: return
-    
-    if not pending_rewards:
-        await message.answer("✅ Нет активных холдов.")
-        return
-    
+    if not pending_rewards: await message.answer("✅ Нет активных холдов."); return
     text = "⏳ *Активные холды:*\n\n"
-    for nid, data in pending_rewards.items():
-        text += f"🆔 {nid}: {data['number']} — {data['reward']}$ (user: `{data['user_id']}`)\n"
-    
+    for hid, data in pending_rewards.items():
+        qr_label = " (QR)" if data.get("type") == "qr" else ""
+        text += f"🆔 {hid}: {data['number']} — {data['reward']}${qr_label} (user: `{data['user_id']}`)\n"
     await message.answer(text, parse_mode="Markdown")
 
 # ==================== АДМИН-ПАНЕЛЬ ====================
@@ -1466,10 +1149,7 @@ async def admin_stats(message: Message):
         cur = await db.execute("SELECT COUNT(*) FROM numbers WHERE status = 'success'"); total_success = (await cur.fetchone())[0]
         cur = await db.execute("SELECT SUM(total_earned) FROM users"); total_paid = (await cur.fetchone())[0] or 0
         cur = await db.execute("SELECT COUNT(*) FROM withdraw_requests WHERE status = 'pending'"); pending_w = (await cur.fetchone())[0]
-    
-    await message.answer(
-        f"📊 *Статистика*\n\n👥 Пользователей: *{total_users}* (💎VIP: {vip_users})\n✅ Успешных: *{total_success}*\n💵 Выплачено: *{round(total_paid / USD_RATE, 2)}$*\n📝 Заявок: *{pending_w}*\n📋 Очередь номеров: *{len(number_queue)}*\n📱 Очередь QR: *{len(qr_queue)}*\n⏳ Холдов: *{len(pending_rewards)}*\n\n💰 Цена: *{await get_setting('price_per_number')}$*\n📱 QR: *{await get_setting('price_per_qr')}$*\n🎁 Реф: *{await get_setting('referral_bonus')}$*\n💎 VIP: *{await get_setting('vip_bonus')}$*\n⏳ Холд: *{await get_setting('hold_minutes')} мин.*",
-        parse_mode="Markdown")
+    await message.answer(f"📊 *Статистика*\n\n👥 Пользователей: *{total_users}* (💎VIP: {vip_users})\n✅ Успешных: *{total_success}*\n💵 Выплачено: *{round(total_paid / USD_RATE, 2)}$*\n📝 Заявок: *{pending_w}*\n📋 Очередь номеров: *{len(number_queue)}*\n📱 Очередь QR: *{len(qr_queue)}*\n⏳ Холдов: *{len(pending_rewards)}*\n\n💰 Цена: *{await get_setting('price_per_number')}$*\n📱 QR: *{await get_setting('price_per_qr')}$*\n🎁 Реф: *{await get_setting('referral_bonus')}$*\n💎 VIP: *{await get_setting('vip_bonus')}$*\n⏳ Холд: *{await get_setting('hold_minutes')} мин.*", parse_mode="Markdown")
 
 @router.message(F.text == "💰 Изменить цену номера")
 async def change_price_start(message: Message, state: FSMContext):
@@ -1594,8 +1274,7 @@ async def create_promo_days(message: Message, state: FSMContext):
     data = await state.get_data()
     expires = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S") if days > 0 else None
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
-        await db.execute("INSERT INTO promocodes (code, bonus_usd, max_uses, expires_at, created_by) VALUES (?, ?, ?, ?, ?)",
-                        (data["promo_code"], data["promo_bonus"], data["promo_uses"], expires, message.from_user.id))
+        await db.execute("INSERT INTO promocodes (code, bonus_usd, max_uses, expires_at, created_by) VALUES (?, ?, ?, ?, ?)", (data["promo_code"], data["promo_bonus"], data["promo_uses"], expires, message.from_user.id))
         await db.commit()
     await message.answer(f"✅ Промокод *{data['promo_code']}* создан!", parse_mode="Markdown", reply_markup=admin_menu())
     await state.clear()
@@ -1619,20 +1298,14 @@ async def clear_queue_start(message: Message):
     confirm_keyboard = InlineKeyboardBuilder()
     confirm_keyboard.add(InlineKeyboardButton(text="✅ Да, очистить всё", callback_data="clear_queue_confirm"))
     confirm_keyboard.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action"))
-    await message.answer(
-        f"🗑 *Очистка очереди*\n\n📤 Номеров в очереди: *{len(number_queue)}*\n📱 QR в очереди: *{len(qr_queue)}*\n\nТочно хочешь очистить ВСЕ очереди?",
-        parse_mode="Markdown", reply_markup=confirm_keyboard.as_markup())
+    await message.answer(f"🗑 *Очистка очереди*\n\n📤 Номеров в очереди: *{len(number_queue)}*\n📱 QR в очереди: *{len(qr_queue)}*\n\nТочно хочешь очистить ВСЕ очереди?", parse_mode="Markdown", reply_markup=confirm_keyboard.as_markup())
 
 @router.callback_query(F.data == "clear_queue_confirm")
 async def clear_queue_confirm(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return
-    numbers_count = len(number_queue)
-    qr_count = len(qr_queue)
-    number_queue.clear()
-    qr_queue.clear()
-    await callback.message.edit_text(
-        f"✅ Очереди очищены!\n\n🗑 Удалено номеров: *{numbers_count}*\n🗑 Удалено QR: *{qr_count}*",
-        parse_mode="Markdown")
+    numbers_count = len(number_queue); qr_count = len(qr_queue)
+    number_queue.clear(); qr_queue.clear()
+    await callback.message.edit_text(f"✅ Очереди очищены!\n\n🗑 Удалено номеров: *{numbers_count}*\n🗑 Удалено QR: *{qr_count}*", parse_mode="Markdown")
     await callback.answer("✅ Очищено!")
 
 @router.message(F.text == "🚫 Блокировка")
