@@ -510,37 +510,42 @@ async def confirm_qr(callback: CallbackQuery):
 async def handle_qr_photo(message: Message):
     t = message.reply_to_message.text or ""
     
-    # ВРЕМЕННАЯ ОТЛАДКА - покажет текст сообщения
-    await message.reply(f"Отладка текста:\n{t[:500]}")
-    
-    if "QR" not in t: return
-    
-    # Пробуем найти ЛЮБЫЕ числа в тексте
-    numbers = re.findall(r'\d+', t)
-    await message.reply(f"Найденные числа: {numbers}")
-    
-    # Берём первое число как user_id, второе как qr_id
-    if len(numbers) >= 2:
-        user_id = int(numbers[0])
-        qr_id = int(numbers[1])
-    else:
-        await message.reply(f"❌ Мало чисел: {len(numbers)}")
+    if "QR" not in t and "Запрос QR" not in t:
         return
     
-    photo_id = message.photo[-1].file_id
+    # Ищем QR ID (число после "QR ID:")
+    qr_match = re.search(r'QR ID:\s*(\d+)', t)
+    if not qr_match:
+        await message.reply("❌ QR ID не найден")
+        return
     
+    qr_id = int(qr_match.group(1))
+    
+    # Получаем user_id из базы по qr_id
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
+        cur = await db.execute("SELECT user_id FROM numbers WHERE id = ? AND type = 'qr'", (qr_id,))
+        row = await cur.fetchone()
+        if not row:
+            await message.reply(f"❌ QR с ID {qr_id} не найден в базе")
+            return
+        
+        user_id = row[0]
+        photo_id = message.photo[-1].file_id
+        
         await db.execute("UPDATE numbers SET photo_id = ?, message_id = ? WHERE id = ?", 
                         (photo_id, message.message_id, qr_id))
         await db.commit()
     
     try:
-        await bot.send_photo(user_id, photo_id, 
+        await bot.send_photo(
+            user_id, 
+            photo_id, 
             caption="📱 <b>QR код для сканирования</b>\n\n<i>Нажми кнопку после сканирования:</i>", 
-            parse_mode="HTML", reply_markup=qr_user_keyboard(qr_id))
-        await message.reply("✅ QR отправлен!")
+            parse_mode="HTML", 
+            reply_markup=qr_user_keyboard(qr_id)
+        )
     except Exception as e:
-        await message.reply(f"❌ Ошибка: {e}")
+        await message.reply(f"❌ Ошибка отправки пользователю {user_id}: {e}")
 # ==================== ОБРАБОТКА НОМЕРОВ ====================
 @router.callback_query(F.data.startswith("code_sent_"))
 async def code_sent(callback: CallbackQuery):
