@@ -638,17 +638,47 @@ async def withdraw_process(message: Message, state: FSMContext):
 @router.message(F.reply_to_message)
 async def admin_check_response(message: Message):
     if message.from_user.id not in ADMIN_IDS: return
+    
     t = message.reply_to_message.text or ""
     if "Заявка на вывод #" not in t: return
-    m = re.search(r'#\s*(\d+)', t) or re.search(r'ID: <code>(\d+)</code>', t)
-    if not m: return
-    uid = int(m.group(1))
-    ms = re.search(r'Сумма: <b>([\d.]+)\$</b>', t); a = ms.group(1) if ms else "?"
+    
+    # Ищем user_id после #
+    user_match = re.search(r'#\s*(\d+)', t)
+    if not user_match:
+        user_match = re.search(r'ID: <code>(\d+)</code>', t)
+    if not user_match:
+        await message.reply("❌ Не удалось найти ID пользователя")
+        return
+    
+    user_id = int(user_match.group(1))
+    
+    # Ищем сумму - ищем число перед $
+    amount_match = re.search(r'(\d+(?:\.\d+)?)\s*\$', t)
+    if not amount_match:
+        amount_match = re.search(r'Сумма: <b>([\d.]+)\$</b>', t)
+    if not amount_match:
+        amount_match = re.search(r'💰 Сумма: <b>(\d+)\$</b>', t)
+    
+    amount = amount_match.group(1) if amount_match else "?"
+    
+    check_text = message.text or message.caption or "Чек отправлен"
+    
     try:
-        await bot.send_message(uid, f"💸 <b>Вывод на {a}$ выполнен!</b>\n\n📝 Чек: {message.text or 'Отправлен'}\n\n<i>Спасибо за работу! 🎉</i>", parse_mode="HTML")
-        await message.reply(f"✅ <b>Чек отправлен пользователю</b> <code>{uid}</code>", parse_mode="HTML")
-        async with aiosqlite.connect(DB_NAME, timeout=10) as db: await db.execute("UPDATE withdraw_requests SET status = 'completed' WHERE admin_msg_id = ?", (message.reply_to_message.message_id,)); await db.commit()
-    except Exception as e: await message.reply(f"❌ <b>Ошибка отправки:</b> {e}", parse_mode="HTML")
+        await bot.send_message(
+            user_id,
+            f"💸 <b>Вывод на {amount}$ выполнен!</b>\n\n"
+            f"📝 Чек: {check_text}\n\n"
+            f"<i>Спасибо за работу! 🎉</i>",
+            parse_mode="HTML"
+        )
+        await message.reply(f"✅ <b>Чек отправлен пользователю</b> <code>{user_id}</code>", parse_mode="HTML")
+        
+        async with aiosqlite.connect(DB_NAME, timeout=10) as db:
+            await db.execute("UPDATE withdraw_requests SET status = 'completed' WHERE admin_msg_id = ?", 
+                           (message.reply_to_message.message_id,))
+            await db.commit()
+    except Exception as e:
+        await message.reply(f"❌ <b>Ошибка отправки:</b> {e}", parse_mode="HTML")
 
 # ==================== ТОП НЕДЕЛИ ====================
 @router.message(F.text == "🏅 Топ недели")
