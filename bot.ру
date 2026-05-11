@@ -18,14 +18,14 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 # ==================== НАСТРОЙКИ ====================
-BOT_TOKEN = "8578138467:AAGbPz3xkMbyEtzUGnnPilrFXSRVnmgUEO4"
-BOT_USERNAME = "@Alishadjs_bot"
-ADMIN_IDS = [8632162183]
-GROUP_ID = -1003980170491
-CHANNEL_ID = "-1003956938813"
-CHANNEL_URL = "https://t.me/jdkaksh"
+BOT_TOKEN = "8696182225:AAErzCefqwJXTLzpOPkAmjp06xqmLlhvdPw"
+BOT_USERNAME = "@smshublove_bot"
+ADMIN_IDS = [8632861931]
+GROUP_ID = -1003944857064
+CHANNEL_ID = "-1003927281437"
+CHANNEL_URL = "https://t.me/+vJ--BMRgVTNiNTg6"
 USD_RATE = 90
-MIN_WITHDRAW_USD = 5
+MIN_WITHDRAW_USD = 4
 SPAM_LIMIT_SECONDS = 30
 
 number_queue = deque()
