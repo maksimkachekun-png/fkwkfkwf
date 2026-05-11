@@ -407,12 +407,20 @@ async def request_qr_from_queue(callback: CallbackQuery):
         await db.execute("UPDATE users SET qr_submitted = qr_submitted + 1 WHERE user_id = ?", (user_id,))
         await db.commit()
     
-    await callback.message.edit_text(
-        f"📱 *QR из очереди*\n{vip_status}👤 @{username} (ID: `{user_id}`)\n🆔 QR ID: {qr_id}\n📊 В очереди: {len(qr_queue)} чел.\n\n*Ответьте на это сообщение фотографией QR-кода*",
+    # Отправляем сообщение с ЯВНЫМ user_id и qr_id
+    msg = await bot.send_message(
+        GROUP_ID,
+        f"📱 *QR из очереди*\n"
+        f"{vip_status}👤 @{username}\n"
+        f"👤 ID пользователя: `{user_id}`\n"
+        f"🆔 QR ID: `{qr_id}`\n"
+        f"📊 В очереди: {len(qr_queue)} чел.\n\n"
+        f"*Ответьте на это сообщение фотографией QR-кода*",
         parse_mode="Markdown"
     )
     
     await bot.send_message(user_id, "📱 Твой запрос QR взят в обработку!\nОжидай фотографию QR-кода.")
+    await callback.message.delete()
     await callback.answer()
 
 # ==================== СДАТЬ НОМЕР ====================
@@ -510,39 +518,34 @@ async def handle_qr_photo(message: Message):
     if "QR из очереди" not in replied_msg.text:
         return
 
-    # Ищем user_id - он между "ID: `" и "`"
-    match_user = re.search(r'ID: `(\d+)`', replied_msg.text)
+    # Ищем user_id
+    match_user = re.search(r'ID пользователя: `(\d+)`', replied_msg.text)
     if not match_user:
-        await message.reply("❌ Не удалось найти пользователя в сообщении!")
-        return
+        # Попробуем старый формат
+        match_user = re.search(r'\(ID: `(\d+)`\)', replied_msg.text)
+        if not match_user:
+            await message.reply("❌ Не удалось найти пользователя в сообщении!")
+            return
     
     user_id = int(match_user.group(1))
     
-    # Ищем QR ID в конце сообщения
-    match_qr = re.search(r'QR ID: (\d+)', replied_msg.text)
+    # Ищем QR ID
+    match_qr = re.search(r'QR ID: `(\d+)`', replied_msg.text)
     if not match_qr:
-        # Если не нашли QR ID, ищем последний QR этого пользователя
-        async with aiosqlite.connect(DB_NAME) as db:
-            cur = await db.execute(
-                "SELECT id FROM numbers WHERE user_id = ? AND type = 'qr' ORDER BY id DESC LIMIT 1",
-                (user_id,)
-            )
-            row = await cur.fetchone()
-            if not row:
-                await message.reply("❌ QR заявка не найдена!")
-                return
-            qr_id = row[0]
-    else:
-        qr_id = int(match_qr.group(1))
+        match_qr = re.search(r'ID: (\d+)', replied_msg.text)
+        if not match_qr:
+            await message.reply("❌ Не удалось найти QR ID!")
+            return
     
+    qr_id = int(match_qr.group(1))
     photo_id = message.photo[-1].file_id
 
-    # Сохраняем фото в базу
+    # Сохраняем фото
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("UPDATE numbers SET photo_id = ? WHERE id = ?", (photo_id, qr_id))
         await db.commit()
 
-    # Отправляем фото пользователю
+    # Отправляем пользователю
     try:
         await bot.send_photo(
             user_id,
@@ -553,7 +556,7 @@ async def handle_qr_photo(message: Message):
         )
         await message.reply("✅ QR отправлен пользователю!")
     except Exception as e:
-        await message.reply(f"❌ Ошибка отправки пользователю: {e}")
+        await message.reply(f"❌ Ошибка отправки: {e}")
 
 # ==================== ОБРАБОТКА НОМЕРОВ ====================
 @router.callback_query(F.data.startswith("code_sent_"))
