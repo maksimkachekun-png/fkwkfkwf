@@ -510,13 +510,56 @@ async def confirm_qr(callback: CallbackQuery):
 async def handle_qr_photo(message: Message):
     t = message.reply_to_message.text or ""
     if "QR" not in t: return
-    um = re.search(r'userid:(\d+)', t); qm = re.search(r'qrid:(\d+)', t)
-    if not um or not qm: await message.reply("❌ ID не найдены"); return
-    uid, qid = int(um.group(1)), int(qm.group(1))
+    
+    # Ищем ID разными способами
+    user_id = None
+    qr_id = None
+    
+    # Способ 1: userid:123 и qrid:456
+    um = re.search(r'userid:(\d+)', t)
+    qm = re.search(r'qrid:(\d+)', t)
+    if um and qm:
+        user_id = int(um.group(1))
+        qr_id = int(qm.group(1))
+    
+    # Способ 2: ищем все числа в сообщении
+    if not user_id or not qr_id:
+        numbers = re.findall(r'(\d+)', t)
+        if len(numbers) >= 2:
+            # Первое число после "👤" или в начале - это user_id
+            # Число после "🆔" - это qr_id
+            qr_match = re.search(r'🆔\s*(\d+)', t)
+            user_match = re.search(r'ID:\s*(\d+)|userid:(\d+)|`(\d+)`', t)
+            if qr_match:
+                qr_id = int(qr_match.group(1))
+            if user_match:
+                user_id = int(user_match.group(1) or user_match.group(2) or user_match.group(3))
+            # Если не нашли - берём первое и второе число
+            if not user_id and len(numbers) >= 2:
+                user_id = int(numbers[0])
+                qr_id = int(numbers[1])
+    
+    if not user_id or not qr_id:
+        await message.reply("❌ Не удалось найти ID в сообщении")
+        return
+    
+    photo_id = message.photo[-1].file_id
+    
     async with aiosqlite.connect(DB_NAME, timeout=10) as db:
-        await db.execute("UPDATE numbers SET photo_id = ?, message_id = ? WHERE id = ?", (message.photo[-1].file_id, message.message_id, qid)); await db.commit()
-    try: await bot.send_photo(uid, message.photo[-1].file_id, caption="📱 <b>QR код для сканирования</b>\n\n<i>Нажми кнопку после сканирования:</i>", parse_mode="HTML", reply_markup=qr_user_keyboard(qid))
-    except Exception as e: await message.reply(f"❌ Ошибка: {e}")
+        await db.execute("UPDATE numbers SET photo_id = ?, message_id = ? WHERE id = ?", 
+                        (photo_id, message.message_id, qr_id))
+        await db.commit()
+    
+    try:
+        await bot.send_photo(
+            user_id, 
+            photo_id, 
+            caption="📱 <b>QR код для сканирования</b>\n\n<i>Нажми кнопку после сканирования:</i>", 
+            parse_mode="HTML", 
+            reply_markup=qr_user_keyboard(qr_id)
+        )
+    except Exception as e:
+        await message.reply(f"❌ Ошибка отправки: {e}")
 
 # ==================== ОБРАБОТКА НОМЕРОВ ====================
 @router.callback_query(F.data.startswith("code_sent_"))
