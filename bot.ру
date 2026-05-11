@@ -728,138 +728,148 @@ async def admin_stats(message: Message):
         ts = (await (await db.execute("SELECT COUNT(*) FROM numbers WHERE status = 'success'")).fetchone())[0]
         tp = (await (await db.execute("SELECT SUM(total_earned) FROM users")).fetchone())[0] or 0
         pw = (await (await db.execute("SELECT COUNT(*) FROM withdraw_requests WHERE status = 'pending'")).fetchone())[0]
-    await message.answer(f"📊 <b>Статистика бота</b>\n\n👥 Пользователей: <b>{tu}</b> (💎VIP: {vu})\n✅ Успешных номеров: <b>{ts}</b>\n💵 Выплачено всего: <b>{round(tp/USD_RATE,2)}$</b>\n📝 Заявок на вывод: <b>{pw}</b>\n📋 Очередь номеров: <b>{len(number_queue)}</b>\n📱 Очередь QR: <b>{len(qr_queue)}</b>\n⏳ Активных холдов: <b>{len(pending_rewards)}</b>\n\n💰 Цена номера: <b>{await get_setting('price_per_number')}$</b>\n📱 Цена QR: <b>{await get_setting('price_per_qr')}$</b>\n🎁 Реф. бонус: <b>{await get_setting('referral_bonus')}$</b>\n💎 VIP бонус: <b>{await get_setting('vip_bonus')}$</b>\n⏳ Время холда: <b>{await get_setting('hold_minutes')} мин.</b>", parse_mode="HTML")
+    await message.answer(f"📊 <b>Статистика бота</b>\n\n👥 Пользователей: <b>{tu}</b> (💎VIP: {vu})\n✅ Успешных: <b>{ts}</b>\n💵 Выплачено: <b>{round(tp/USD_RATE,2)}$</b>\n📝 Заявок: <b>{pw}</b>\n📋 Очередь: <b>{len(number_queue)}</b> ном. / <b>{len(qr_queue)}</b> QR\n⏳ Холдов: <b>{len(pending_rewards)}</b>\n\n💰 Цена: <b>{await get_setting('price_per_number')}$</b> / QR: <b>{await get_setting('price_per_qr')}$</b>\n🎁 Реф: <b>{await get_setting('referral_bonus')}$</b> / 💎 VIP: <b>{await get_setting('vip_bonus')}$</b>\n⏳ Холд: <b>{await get_setting('hold_minutes')} мин.</b>", parse_mode="HTML")
 
-# Остальные админские обработчики
 @router.message(F.text == "💰 Изменить цену номера")
 async def change_price_start(message: Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS: return
-    await message.answer(f"💰 Текущая цена: <b>{await get_setting('price_per_number')}$</b>\n\nВведи новую цену:", parse_mode="HTML", reply_markup=cancel_keyboard())
+    await message.answer(f"💰 Текущая: <b>{await get_setting('price_per_number')}$</b>\nВведи новую:", parse_mode="HTML", reply_markup=cancel_keyboard())
     await state.set_state(AdminStates.change_price)
 
 @router.message(AdminStates.change_price)
 async def change_price_set(message: Message, state: FSMContext):
-    try: await set_setting('price_per_number', str(float(message.text))); await message.answer("✅ <b>Цена изменена!</b>", parse_mode="HTML", reply_markup=admin_menu()); await state.clear()
-    except: await message.answer("❌ Введи число!")
+    try: await set_setting('price_per_number', str(float(message.text))); await message.answer("✅ Изменено!", reply_markup=admin_menu()); await state.clear()
+    except: await message.answer("❌ Число!")
 
 @router.message(F.text == "📱 Изменить цену QR")
 async def change_qr_price_start(message: Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS: return
-    await message.answer(f"📱 Текущая цена QR: <b>{await get_setting('price_per_qr')}$</b>\n\nВведи новую цену:", parse_mode="HTML", reply_markup=cancel_keyboard())
+    await message.answer(f"📱 Текущая: <b>{await get_setting('price_per_qr')}$</b>\nВведи новую:", parse_mode="HTML", reply_markup=cancel_keyboard())
     await state.set_state(AdminStates.change_qr_price)
 
 @router.message(AdminStates.change_qr_price)
 async def change_qr_price_set(message: Message, state: FSMContext):
-    try: await set_setting('price_per_qr', str(float(message.text))); await message.answer("✅ <b>Цена QR изменена!</b>", parse_mode="HTML", reply_markup=admin_menu()); await state.clear()
-    except: await message.answer("❌ Введи число!")
+    try: await set_setting('price_per_qr', str(float(message.text))); await message.answer("✅ Изменено!", reply_markup=admin_menu()); await state.clear()
+    except: await message.answer("❌ Число!")
 
 @router.message(F.text == "🎁 Изменить бонус реферала")
 async def change_ref_bonus_start(message: Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS: return
-    await message.answer(f"🎁 Текущий бонус: <b>{await get_setting('referral_bonus')}$</b>\n\nВведи новый бонус:", parse_mode="HTML", reply_markup=cancel_keyboard())
+    await message.answer(f"🎁 Текущий: <b>{await get_setting('referral_bonus')}$</b>\nВведи новый:", parse_mode="HTML", reply_markup=cancel_keyboard())
     await state.set_state(AdminStates.change_ref_bonus)
 
 @router.message(AdminStates.change_ref_bonus)
 async def change_ref_bonus_set(message: Message, state: FSMContext):
-    try: await set_setting('referral_bonus', str(float(message.text))); await message.answer("✅ <b>Бонус изменён!</b>", parse_mode="HTML", reply_markup=admin_menu()); await state.clear()
-    except: await message.answer("❌ Введи число!")
+    try: await set_setting('referral_bonus', str(float(message.text))); await message.answer("✅ Изменён!", reply_markup=admin_menu()); await state.clear()
+    except: await message.answer("❌ Число!")
 
 @router.message(F.text == "💎 Изменить VIP бонус")
 async def change_vip_bonus_start(message: Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS: return
-    await message.answer(f"💎 Текущий VIP бонус: <b>{await get_setting('vip_bonus')}$</b>\n\nВведи новый бонус:", parse_mode="HTML", reply_markup=cancel_keyboard())
+    await message.answer(f"💎 Текущий: <b>{await get_setting('vip_bonus')}$</b>\nВведи новый:", parse_mode="HTML", reply_markup=cancel_keyboard())
     await state.set_state(AdminStates.change_vip_bonus)
 
 @router.message(AdminStates.change_vip_bonus)
 async def change_vip_bonus_set(message: Message, state: FSMContext):
-    try: await set_setting('vip_bonus', str(float(message.text))); await message.answer("✅ <b>VIP бонус изменён!</b>", parse_mode="HTML", reply_markup=admin_menu()); await state.clear()
-    except: await message.answer("❌ Введи число!")
+    try: await set_setting('vip_bonus', str(float(message.text))); await message.answer("✅ Изменён!", reply_markup=admin_menu()); await state.clear()
+    except: await message.answer("❌ Число!")
 
 @router.message(F.text == "⏳ Изменить время холда")
 async def change_hold_start(message: Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS: return
-    await message.answer(f"⏳ Текущее время холда: <b>{await get_setting('hold_minutes')} мин.</b>\n\nВведи новое время:", parse_mode="HTML", reply_markup=cancel_keyboard())
+    await message.answer(f"⏳ Текущее: <b>{await get_setting('hold_minutes')} мин.</b>\nВведи новое:", parse_mode="HTML", reply_markup=cancel_keyboard())
     await state.set_state(AdminStates.change_hold)
 
 @router.message(AdminStates.change_hold)
 async def change_hold_set(message: Message, state: FSMContext):
     try:
         mn = int(message.text)
-        if mn < 1: await message.answer("❌ Минимум 1 минута!"); return
-        await set_setting('hold_minutes', str(mn)); await message.answer(f"✅ <b>{mn} мин.</b>", parse_mode="HTML", reply_markup=admin_menu()); await state.clear()
-    except: await message.answer("❌ Введи число!")
+        if mn < 1: await message.answer("❌ Мин. 1 минута!"); return
+        await set_setting('hold_minutes', str(mn)); await message.answer(f"✅ {mn} мин.", reply_markup=admin_menu()); await state.clear()
+    except: await message.answer("❌ Число!")
 
 @router.message(F.text == "🏆 Изменить призы")
-async def ch_prz(m, s):
-    if m.from_user.id not in ADMIN_IDS: return
+async def change_prizes_start(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS: return
     p1, p2, p3 = await get_setting('prize_1'), await get_setting('prize_2'), await get_setting('prize_3')
-    await m.answer(f"🏆 Текущие призы:\n🥇 1 место: <b>{p1}$</b>\n🥈 2 место: <b>{p2}$</b>\n🥉 3 место: <b>{p3}$</b>\n\nВведи приз за 1 место:", parse_mode="HTML", reply_markup=cancel_keyboard()); await s.set_state(AdminStates.change_prize_1)
+    await message.answer(f"🏆 Текущие: {p1}$ / {p2}$ / {p3}$\n🥇 1 место:", parse_mode="HTML", reply_markup=cancel_keyboard())
+    await state.set_state(AdminStates.change_prize_1)
+
 @router.message(AdminStates.change_prize_1)
-async def ch_p1(m, s):
-    try: await s.update_data(prize_1=float(m.text)); await m.answer("Введи приз за 2 место:"); await s.set_state(AdminStates.change_prize_2)
-    except: await m.answer("❌")
+async def change_prize_1(message: Message, state: FSMContext):
+    try: await state.update_data(prize_1=float(message.text)); await message.answer("🥈 2 место:"); await state.set_state(AdminStates.change_prize_2)
+    except: await message.answer("❌")
+
 @router.message(AdminStates.change_prize_2)
-async def ch_p2(m, s):
-    try: await s.update_data(prize_2=float(m.text)); await m.answer("Введи приз за 3 место:"); await s.set_state(AdminStates.change_prize_3)
-    except: await m.answer("❌")
+async def change_prize_2(message: Message, state: FSMContext):
+    try: await state.update_data(prize_2=float(message.text)); await message.answer("🥉 3 место:"); await state.set_state(AdminStates.change_prize_3)
+    except: await message.answer("❌")
+
 @router.message(AdminStates.change_prize_3)
-async def ch_p3(m, s):
+async def change_prize_3(message: Message, state: FSMContext):
     try:
-        d = await s.get_data(); p3 = float(m.text)
+        d = await state.get_data(); p3 = float(message.text)
         await set_setting('prize_1', str(d['prize_1'])); await set_setting('prize_2', str(d['prize_2'])); await set_setting('prize_3', str(p3))
-        await m.answer(f"✅ <b>Призы обновлены!</b>\n🥇 {d['prize_1']}$\n🥈 {d['prize_2']}$\n🥉 {p3}$", parse_mode="HTML", reply_markup=admin_menu()); await s.clear()
-    except: await m.answer("❌")
+        await message.answer(f"✅ {d['prize_1']}$ / {d['prize_2']}$ / {p3}$", reply_markup=admin_menu()); await state.clear()
+    except: await message.answer("❌")
 
 @router.message(F.text == "🔄 Вкл/Выкл приёмку")
-async def toggle_acc(m):
-    if m.from_user.id not in ADMIN_IDS: return
+async def toggle_accepting(message: Message):
+    if message.from_user.id not in ADMIN_IDS: return
     c = await get_setting('accepting_enabled'); await set_setting('accepting_enabled', '0' if c=='1' else '1')
-    await m.answer(f"🔄 Приёмка: <b>{'✅ ВКЛЮЧЕНА' if c=='0' else '⏸️ ВЫКЛЮЧЕНА'}</b>", parse_mode="HTML", reply_markup=admin_menu())
+    await message.answer(f"🔄 {'✅ ВКЛ' if c=='0' else '⏸️ ВЫКЛ'}", reply_markup=admin_menu())
 
 @router.message(F.text == "💎 Выдать VIP")
-async def gv_start(m, s): 
-    if m.from_user.id not in ADMIN_IDS: return
-    await m.answer("💎 Введи ID пользователя:", parse_mode="HTML", reply_markup=cancel_keyboard()); await s.set_state(AdminStates.give_vip)
+async def give_vip_start(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS: return
+    await message.answer("💎 ID:", reply_markup=cancel_keyboard()); await state.set_state(AdminStates.give_vip)
+
 @router.message(AdminStates.give_vip)
-async def gv_u(m, s):
-    try: await s.update_data(uid=int(m.text)); await m.answer("📆 Введи количество дней:"); await s.set_state(AdminStates.vip_days)
-    except: await m.answer("❌")
+async def give_vip_user(message: Message, state: FSMContext):
+    try: await state.update_data(uid=int(message.text)); await message.answer("📆 Дней:"); await state.set_state(AdminStates.vip_days)
+    except: await message.answer("❌")
+
 @router.message(AdminStates.vip_days)
-async def gv_d(m, s):
+async def give_vip_days(message: Message, state: FSMContext):
     try:
-        d = await s.get_data(); days = int(m.text)
+        d = await state.get_data(); days = int(message.text)
         vu = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         async with aiosqlite.connect(DB_NAME, timeout=10) as db: await db.execute("UPDATE users SET is_vip = 1, vip_until = ? WHERE user_id = ?", (vu, d['uid'])); await db.commit()
-        await m.answer(f"✅ <b>VIP выдан пользователю</b> <code>{d['uid']}</code> <b>на {days} дней!</b>", parse_mode="HTML", reply_markup=admin_menu()); await s.clear()
-    except: await m.answer("❌")
+        await message.answer(f"✅ VIP <code>{d['uid']}</code> на {days} дн.", reply_markup=admin_menu()); await state.clear()
+    except: await message.answer("❌")
 
 @router.message(F.text == "🎫 Создать промокод")
-async def cp_start(m, s): 
-    if m.from_user.id not in ADMIN_IDS: return
-    await m.answer("🎫 Введи код промокода:", parse_mode="HTML", reply_markup=cancel_keyboard()); await s.set_state(AdminStates.create_promo_code)
+async def create_promo_start(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS: return
+    await message.answer("🎫 Код:", reply_markup=cancel_keyboard()); await state.set_state(AdminStates.create_promo_code)
+
 @router.message(AdminStates.create_promo_code)
-async def cp_c(m, s): await s.update_data(promo_code=m.text.strip().upper()); await m.answer("💰 Введи бонус в USD:"); await s.set_state(AdminStates.create_promo_bonus)
+async def create_promo_code(message: Message, state: FSMContext):
+    await state.update_data(promo_code=message.text.strip().upper()); await message.answer("💰 Бонус:"); await state.set_state(AdminStates.create_promo_bonus)
+
 @router.message(AdminStates.create_promo_bonus)
-async def cp_b(m, s):
-    try: await s.update_data(promo_bonus=float(m.text)); await m.answer("👥 Введи лимит использований (0=безлимит):"); await s.set_state(AdminStates.create_promo_uses)
-    except: await m.answer("❌")
+async def create_promo_bonus(message: Message, state: FSMContext):
+    try: await state.update_data(promo_bonus=float(message.text)); await message.answer("👥 Лимит (0=∞):"); await state.set_state(AdminStates.create_promo_uses)
+    except: await message.answer("❌")
+
 @router.message(AdminStates.create_promo_uses)
-async def cp_u(m, s):
-    try: await s.update_data(promo_uses=int(m.text)); await m.answer("📆 Введи срок действия в днях (0=безлимит):"); await s.set_state(AdminStates.create_promo_days)
-    except: await m.answer("❌")
+async def create_promo_uses(message: Message, state: FSMContext):
+    try: await state.update_data(promo_uses=int(message.text)); await message.answer("📆 Дней (0=∞):"); await state.set_state(AdminStates.create_promo_days)
+    except: await message.answer("❌")
+
 @router.message(AdminStates.create_promo_days)
-async def cp_d(m, s):
+async def create_promo_days(message: Message, state: FSMContext):
     try:
-        d = await s.get_data(); days = int(m.text)
+        d = await state.get_data(); days = int(message.text)
         exp = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S") if days > 0 else None
-        async with aiosqlite.connect(DB_NAME, timeout=10) as db: await db.execute("INSERT INTO promocodes (code, bonus_usd, max_uses, expires_at, created_by) VALUES (?,?,?,?,?)", (d['promo_code'], d['promo_bonus'], d['promo_uses'], exp, m.from_user.id)); await db.commit()
-        await m.answer(f"✅ <b>Промокод создан!</b>\n\n🎫 Код: <b>{d['promo_code']}</b>\n💰 Бонус: {d['promo_bonus']}$\n👥 Лимит: {d['promo_uses'] or '∞'}\n📆 Срок: {days or '∞'} дн.", parse_mode="HTML", reply_markup=admin_menu()); await s.clear()
-    except: await m.answer("❌")
+        async with aiosqlite.connect(DB_NAME, timeout=10) as db: await db.execute("INSERT INTO promocodes (code, bonus_usd, max_uses, expires_at, created_by) VALUES (?,?,?,?,?)", (d['promo_code'], d['promo_bonus'], d['promo_uses'], exp, message.from_user.id)); await db.commit()
+        await message.answer(f"✅ <b>{d['promo_code']}</b>\n💰 {d['promo_bonus']}$\n👥 {d['promo_uses'] or '∞'}\n📆 {days or '∞'} дн.", reply_markup=admin_menu()); await state.clear()
+    except: await message.answer("❌")
 
 @router.message(F.text == "📋 Очередь")
-async def show_q(m):
-    if m.from_user.id not in ADMIN_IDS: return
-    t = "📋 <b>Текущие очереди</b>\n\n<b>Номера:</b>\n"
+async def show_queue(message: Message):
+    if message.from_user.id not in ADMIN_IDS: return
+    t = "📋 <b>Очереди</b>\n\n<b>Номера:</b>\n"
     if number_queue:
         for i, e in enumerate(number_queue, 1): t += f"{i}. {'💎' if e['vip'] else ''} @{e['username']} - <code>{e['number']}</code>\n"
     else: t += "Пусто\n"
@@ -867,76 +877,82 @@ async def show_q(m):
     if qr_queue:
         for i, e in enumerate(qr_queue, 1): t += f"{i}. {'💎' if e['vip'] else ''} @{e['username']}\n"
     else: t += "Пусто"
-    await m.answer(t, parse_mode="HTML")
+    await message.answer(t, parse_mode="HTML")
 
 @router.message(F.text == "🗑 Очистить очередь")
-async def clr_q(m):
-    if m.from_user.id not in ADMIN_IDS: return
-    kb = InlineKeyboardBuilder(); kb.add(InlineKeyboardButton(text="✅ Да, очистить", callback_data="clear_queue_confirm")); kb.add(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action"))
-    await m.answer(f"🗑 <b>Очистка очереди</b>\n\n📤 Номеров: <b>{len(number_queue)}</b>\n📱 QR: <b>{len(qr_queue)}</b>\n\nТочно очистить?", parse_mode="HTML", reply_markup=kb.as_markup())
+async def clear_queue_start(message: Message):
+    if message.from_user.id not in ADMIN_IDS: return
+    kb = InlineKeyboardBuilder(); kb.add(InlineKeyboardButton(text="✅ Да", callback_data="clear_queue_confirm")); kb.add(InlineKeyboardButton(text="❌ Нет", callback_data="cancel_action"))
+    await message.answer(f"🗑 Ном.: {len(number_queue)}, QR: {len(qr_queue)}\nОчистить?", reply_markup=kb.as_markup())
+
 @router.callback_query(F.data == "clear_queue_confirm")
-async def clr_q_c(c):
-    if c.from_user.id not in ADMIN_IDS: return
+async def clear_queue_confirm(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS: return
     nc, qc = len(number_queue), len(qr_queue); number_queue.clear(); qr_queue.clear()
-    await c.message.edit_text(f"✅ <b>Очереди очищены!</b>\n🗑 Номеров: {nc}\n🗑 QR: {qc}", parse_mode="HTML"); await c.answer("✅")
+    await callback.message.edit_text(f"✅ {nc} ном., {qc} QR"); await callback.answer("✅")
 
 @router.message(F.text == "🚫 Блокировка")
-async def bl_start(m, s): 
-    if m.from_user.id not in ADMIN_IDS: return
-    await m.answer("🚫 Введи ID пользователя:", parse_mode="HTML", reply_markup=cancel_keyboard()); await s.set_state(AdminStates.block_user)
+async def block_user_start(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS: return
+    await message.answer("🚫 ID:", reply_markup=cancel_keyboard()); await state.set_state(AdminStates.block_user)
+
 @router.message(AdminStates.block_user)
-async def bl_do(m, s):
+async def block_user_do(message: Message, state: FSMContext):
     try:
-        async with aiosqlite.connect(DB_NAME, timeout=10) as db: await db.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (int(m.text),)); await db.commit()
-        await m.answer(f"✅ <b>Пользователь</b> <code>{m.text}</code> <b>заблокирован!</b>", parse_mode="HTML", reply_markup=admin_menu()); await s.clear()
-    except: await m.answer("❌")
+        async with aiosqlite.connect(DB_NAME, timeout=10) as db: await db.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (int(message.text),)); await db.commit()
+        await message.answer(f"✅ <code>{message.text}</code> забанен", reply_markup=admin_menu()); await state.clear()
+    except: await message.answer("❌")
 
 @router.message(F.text == "✅ Разблокировка")
-async def ub_start(m, s): 
-    if m.from_user.id not in ADMIN_IDS: return
-    await m.answer("✅ Введи ID пользователя:", parse_mode="HTML", reply_markup=cancel_keyboard()); await s.set_state(AdminStates.unblock_user)
+async def unblock_user_start(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS: return
+    await message.answer("✅ ID:", reply_markup=cancel_keyboard()); await state.set_state(AdminStates.unblock_user)
+
 @router.message(AdminStates.unblock_user)
-async def ub_do(m, s):
+async def unblock_user_do(message: Message, state: FSMContext):
     try:
-        async with aiosqlite.connect(DB_NAME, timeout=10) as db: await db.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (int(m.text),)); await db.commit()
-        await m.answer(f"✅ <b>Пользователь</b> <code>{m.text}</code> <b>разблокирован!</b>", parse_mode="HTML", reply_markup=admin_menu()); await s.clear()
-    except: await m.answer("❌")
+        async with aiosqlite.connect(DB_NAME, timeout=10) as db: await db.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (int(message.text),)); await db.commit()
+        await message.answer(f"✅ <code>{message.text}</code> разбанен", reply_markup=admin_menu()); await state.clear()
+    except: await message.answer("❌")
 
 @router.message(F.text == "📢 Рассылка")
-async def br_start(m, s): 
-    if m.from_user.id not in ADMIN_IDS: return
-    await m.answer("📢 Введи текст для рассылки:", parse_mode="HTML", reply_markup=cancel_keyboard()); await s.set_state(AdminStates.broadcast)
+async def broadcast_start(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS: return
+    await message.answer("📢 Текст:", reply_markup=cancel_keyboard()); await state.set_state(AdminStates.broadcast)
+
 @router.message(AdminStates.broadcast)
-async def br_do(m, s):
+async def broadcast_do(message: Message, state: FSMContext):
     async with aiosqlite.connect(DB_NAME, timeout=10) as db: users = await (await db.execute("SELECT user_id FROM users WHERE is_banned = 0")).fetchall()
     sent, fail = 0, 0
     for (uid,) in users:
-        try: await bot.send_message(uid, m.text); sent += 1
+        try: await bot.send_message(uid, message.text); sent += 1
         except: fail += 1
         await asyncio.sleep(0.05)
-    await m.answer(f"📢 <b>Рассылка завершена!</b>\n✅ {sent} | ❌ {fail}", parse_mode="HTML", reply_markup=admin_menu()); await s.clear()
+    await message.answer(f"📢 {sent} ✅ / {fail} ❌", reply_markup=admin_menu()); await state.clear()
 
 @router.message(F.text == "💳 Изменить баланс")
-async def cb_start(m, s): 
-    if m.from_user.id not in ADMIN_IDS: return
-    await m.answer("💳 Введи ID пользователя:", parse_mode="HTML", reply_markup=cancel_keyboard()); await s.set_state(AdminStates.change_balance)
+async def change_balance_start(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS: return
+    await message.answer("💳 ID:", reply_markup=cancel_keyboard()); await state.set_state(AdminStates.change_balance)
+
 @router.message(AdminStates.change_balance)
-async def cb_u(m, s):
-    try: await s.update_data(uid=int(m.text)); await m.answer("💰 Введи сумму в USD (можно отрицательную):"); await s.set_state(AdminStates.change_balance_amount)
-    except: await m.answer("❌")
+async def change_balance_user(message: Message, state: FSMContext):
+    try: await state.update_data(uid=int(message.text)); await message.answer("💰 USD (±):"); await state.set_state(AdminStates.change_balance_amount)
+    except: await message.answer("❌")
+
 @router.message(AdminStates.change_balance_amount)
-async def cb_a(m, s):
+async def change_balance_amount(message: Message, state: FSMContext):
     try:
-        d = await s.get_data(); a = float(m.text)
+        d = await state.get_data(); a = float(message.text)
         async with aiosqlite.connect(DB_NAME, timeout=10) as db:
             await db.execute("UPDATE users SET balance_rub = balance_rub + ? WHERE user_id = ?", (a*USD_RATE, d['uid']))
             nb = round((await (await db.execute("SELECT balance_rub FROM users WHERE user_id = ?", (d['uid'],))).fetchone())[0]/USD_RATE, 2); await db.commit()
-        await m.answer(f"✅ <b>Баланс пользователя</b> <code>{d['uid']}</code>: <b>{nb}$</b>", parse_mode="HTML", reply_markup=admin_menu()); await s.clear()
-    except: await m.answer("❌")
+        await message.answer(f"✅ <code>{d['uid']}</code>: {nb}$", reply_markup=admin_menu()); await state.clear()
+    except: await message.answer("❌")
 
 @router.message(F.text == "🔙 Выйти из админки")
-async def exit_adm(m):
-    if m.from_user.id in ADMIN_IDS: await m.answer("👋 <b>Вышел из админ-панели</b>", parse_mode="HTML", reply_markup=main_menu())
+async def exit_admin(message: Message):
+    if message.from_user.id in ADMIN_IDS: await message.answer("👋 Вышел", reply_markup=main_menu())
 
 # ==================== ЗАПУСК ====================
 async def main():
