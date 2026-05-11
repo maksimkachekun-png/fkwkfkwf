@@ -151,6 +151,15 @@ async def add_history(user_id: int, type_: str, number: str, amount: float, stat
         )
         await db.commit()
 
+async def get_thread_id(message_id: int):
+    try:
+        msg = await bot.forward_message(GROUP_ID, GROUP_ID, message_id)
+        thread_id = msg.message_thread_id
+        await msg.delete()
+        return thread_id
+    except:
+        return None
+
 # ==================== КНОПКА ОТМЕНЫ ====================
 def cancel_keyboard():
     builder = InlineKeyboardBuilder()
@@ -363,9 +372,11 @@ async def process_next_in_queue(queue_type: str):
 
 async def process_reward_after_hold(number_id: int, user_id: int, number: str, reward: float):
     hold_minutes = int(await get_setting('hold_minutes'))
+    logging.info(f"Запущен холд для {number_id} на {hold_minutes} минут")
     await asyncio.sleep(hold_minutes * 60)
     
     if number_id not in pending_rewards:
+        logging.info(f"Холд {number_id} уже удалён из pending_rewards")
         return
     
     ref_bonus = float(await get_setting('referral_bonus'))
@@ -375,12 +386,24 @@ async def process_reward_after_hold(number_id: int, user_id: int, number: str, r
             cur = await db.execute("SELECT status FROM numbers WHERE id = ?", (number_id,))
             row = await cur.fetchone()
             
-            if row and row[0] == 'failed':
+            if not row:
+                logging.info(f"Номер {number_id} не найден в базе")
+                if number_id in pending_rewards:
+                    del pending_rewards[number_id]
+                return
+                
+            status = row[0]
+            logging.info(f"Статус номера {number_id}: {status}")
+            
+            if status == 'failed':
+                logging.info(f"Номер {number_id} помечен как failed, начисление отменено")
                 if number_id in pending_rewards:
                     del pending_rewards[number_id]
                 return
             
-            if row and row[0] == 'success_hold':
+            if status == 'success_hold':
+                logging.info(f"Начисляем {reward}$ пользователю {user_id}")
+                
                 await db.execute(
                     "UPDATE users SET balance_rub = balance_rub + ?, total_earned = total_earned + ?, numbers_success = numbers_success + 1 WHERE user_id = ?",
                     (reward * USD_RATE, reward * USD_RATE, user_id))
@@ -408,21 +431,31 @@ async def process_reward_after_hold(number_id: int, user_id: int, number: str, r
                 await add_history(user_id, "sms", number, reward, "success")
                 await db.commit()
                 
+                # Проверяем баланс после начисления
+                cur = await db.execute("SELECT balance_rub FROM users WHERE user_id = ?", (user_id,))
+                bal_row = await cur.fetchone()
+                new_balance = round(bal_row[0] / USD_RATE, 2) if bal_row else 0
+                logging.info(f"Новый баланс пользователя {user_id}: {new_balance}$")
+                
                 vip_text = " (+VIP)" if await is_vip(user_id) else ""
                 try:
                     await bot.send_message(
                         user_id,
-                        f"✅ Холд завершён!\n💰 Начислено: *{reward}${vip_text}* ({reward * USD_RATE}₽)\n📱 Номер: `{number}`",
+                        f"✅ Холд завершён!\n"
+                        f"💰 Начислено: *{reward}${vip_text}* ({reward * USD_RATE}₽)\n"
+                        f"💳 Баланс: *{new_balance}$*\n"
+                        f"📱 Номер: `{number}`",
                         parse_mode="Markdown"
                     )
-                except:
-                    pass
+                except Exception as e:
+                    logging.error(f"Не удалось отправить уведомление: {e}")
         
         if number_id in pending_rewards:
             del pending_rewards[number_id]
+            logging.info(f"Холд {number_id} успешно завершён")
             
     except Exception as e:
-        logging.error(f"Error in process_reward_after_hold: {e}")
+        logging.error(f"Ошибка в process_reward_after_hold: {e}")
         if number_id in pending_rewards:
             del pending_rewards[number_id]
 
@@ -523,11 +556,17 @@ async def request_qr_from_queue(callback: CallbackQuery):
     
     msg_text = f"📱 *QR из очереди*\n{vip_status}👤 @{username}\nuserid:{user_id}\nqrid:{qr_id}\n📊 В очереди: {len(qr_queue)} чел.\n\n*Ответьте фото QR-кода*"
     
-    await bot.send_message(
+    thread_id = callback.message.message_thread_id
+    
+    sent_msg = await bot.send_message(
         GROUP_ID, msg_text,
         parse_mode="Markdown",
-        message_thread_id=callback.message.message_thread_id
+        message_thread_id=thread_id
     )
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE numbers SET message_id = ? WHERE id = ?", (sent_msg.message_id, qr_id))
+        await db.commit()
     
     await bot.send_message(user_id, "📱 Твой запрос QR взят в обработку!\nОжидай фотографию QR-кода.")
     await callback.message.delete()
@@ -600,7 +639,6 @@ async def number_entered(message: Message, state: FSMContext):
 @router.message(F.text == "📱 Сдать QR")
 async def start_qr(message: Message):
     user_id = message.from_user.id
-    username = message.from_user.username or f"id{user_id}"
 
     if not await check_subscription(user_id):
         await message.answer("⚠️ Подпишись на канал:", reply_markup=check_sub_keyboard())
@@ -754,7 +792,8 @@ async def number_success(callback: CallbackQuery):
             
             await callback.message.edit_text(
                 callback.message.text + f"\n\n✅ *ВСТАЛ!* (+{reward}$)\n⏳ Холд {hold_minutes} мин...",
-                parse_mode="Markdown"
+                parse_mode="Markdown",
+                reply_markup=number_action_keyboard(number_id)
             )
             
             task = asyncio.create_task(process_reward_after_hold(number_id, user_id, row[1], reward))
@@ -829,15 +868,17 @@ async def qr_scanned(callback: CallbackQuery):
     qr_id = int(parts[2])
     
     async with aiosqlite.connect(DB_NAME) as db:
-        cur = await db.execute("SELECT user_id FROM numbers WHERE id = ?", (qr_id,))
+        cur = await db.execute("SELECT user_id, message_id FROM numbers WHERE id = ?", (qr_id,))
         row = await cur.fetchone()
         if row:
+            thread_id = await get_thread_id(row[1]) if row[1] else None
+            
             await bot.send_message(
                 GROUP_ID,
                 f"📱 *QR отсканирован*\n👤 userid:{row[0]}\nqrid:{qr_id}\n\nПодтвердите результат:",
                 parse_mode="Markdown",
                 reply_markup=qr_result_keyboard(qr_id),
-                message_thread_id=callback.message.message_thread_id
+                message_thread_id=thread_id
             )
     
     await callback.message.edit_caption("✅ QR успешно отсканирован! Ожидайте подтверждения.", reply_markup=None)
@@ -861,7 +902,7 @@ async def qr_success(callback: CallbackQuery):
     qr_id = int(parts[2])
     
     async with aiosqlite.connect(DB_NAME) as db:
-        cur = await db.execute("SELECT user_id FROM numbers WHERE id = ?", (qr_id,))
+        cur = await db.execute("SELECT user_id, message_id FROM numbers WHERE id = ?", (qr_id,))
         row = await cur.fetchone()
         if row:
             user_id = row[0]
@@ -887,7 +928,7 @@ async def qr_failed(callback: CallbackQuery):
     qr_id = int(parts[2])
     
     async with aiosqlite.connect(DB_NAME) as db:
-        cur = await db.execute("SELECT user_id FROM numbers WHERE id = ?", (qr_id,))
+        cur = await db.execute("SELECT user_id, message_id FROM numbers WHERE id = ?", (qr_id,))
         row = await cur.fetchone()
         if row:
             await db.execute("UPDATE numbers SET status = 'failed' WHERE id = ?", (qr_id,))
@@ -941,14 +982,7 @@ async def qr_password_entered(message: Message, state: FSMContext):
     async with aiosqlite.connect(DB_NAME) as db:
         cur = await db.execute("SELECT message_id FROM numbers WHERE id = ?", (qr_id,))
         row = await cur.fetchone()
-        thread_id = None
-        if row and row[0]:
-            try:
-                msg = await bot.forward_message(GROUP_ID, GROUP_ID, row[0])
-                thread_id = msg.message_thread_id
-                await msg.delete()
-            except:
-                pass
+        thread_id = await get_thread_id(row[0]) if row and row[0] else None
         
         await db.execute("UPDATE numbers SET status = 'password_entered' WHERE id = ?", (qr_id,))
         await db.commit()
