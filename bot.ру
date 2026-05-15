@@ -18,7 +18,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 # ==================== НАСТРОЙКИ ====================
-BOT_TOKEN = "8621847870:AAGekEqYxjjprT9o8qGibA04q1fDkGhcLAI"
+BOT_TOKEN = "8909360149:AAF8_pdnXDH-9JB1p429lClR8Pw-tyS5lD8"
 BOT_USERNAME = "@smshubtop_bot"
 ADMIN_IDS = [8632861931]
 GROUP_ID = -1003944857064
